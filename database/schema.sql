@@ -1,0 +1,121 @@
+CREATE DATABASE IF NOT EXISTS eles_lms
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE eles_lms;
+
+CREATE TABLE users (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(150) NOT NULL,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role ENUM('student', 'instructor') NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE levels (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  description TEXT NULL,
+  teaching_manual LONGTEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE units (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  level_id BIGINT UNSIGNED NOT NULL,
+  unit_number TINYINT UNSIGNED NOT NULL,
+  unit_code VARCHAR(50) NOT NULL UNIQUE,
+  title VARCHAR(500) NOT NULL,
+  status ENUM('Mandatory', 'Optional') NOT NULL,
+  description TEXT NULL,
+  instructor_id BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_units_level
+    FOREIGN KEY (level_id) REFERENCES levels(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_units_instructor
+    FOREIGN KEY (instructor_id) REFERENCES users(id)
+    ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT uq_units_level_number UNIQUE (level_id, unit_number),
+  INDEX idx_units_instructor (instructor_id),
+  INDEX idx_units_level (level_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE assessments (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  level_id BIGINT UNSIGNED NOT NULL,
+  type ENUM(
+    'Direct Observation',
+    'Question and Answer',
+    'Personal Statement',
+    'Work Practice'
+  ) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_assessments_level
+    FOREIGN KEY (level_id) REFERENCES levels(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT uq_assessments_level_type UNIQUE (level_id, type)
+) ENGINE=InnoDB;
+
+CREATE TABLE announcements (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  level_id BIGINT UNSIGNED NULL,
+  title VARCHAR(255) NOT NULL,
+  content LONGTEXT NOT NULL,
+  author_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_announcements_level
+    FOREIGN KEY (level_id) REFERENCES levels(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_announcements_author
+    FOREIGN KEY (author_id) REFERENCES users(id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  INDEX idx_announcements_level_created (level_id, created_at),
+  INDEX idx_announcements_author (author_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE forum_topics (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  level_id BIGINT UNSIGNED NULL,
+  title VARCHAR(255) NOT NULL,
+  content LONGTEXT NOT NULL,
+  author_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_forum_topics_level
+    FOREIGN KEY (level_id) REFERENCES levels(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_forum_topics_author
+    FOREIGN KEY (author_id) REFERENCES users(id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  INDEX idx_forum_topics_level_created (level_id, created_at),
+  INDEX idx_forum_topics_author (author_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE forum_replies (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  topic_id BIGINT UNSIGNED NOT NULL,
+  content LONGTEXT NOT NULL,
+  author_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_forum_replies_topic
+    FOREIGN KEY (topic_id) REFERENCES forum_topics(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_forum_replies_author
+    FOREIGN KEY (author_id) REFERENCES users(id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  INDEX idx_forum_replies_topic_created (topic_id, created_at),
+  INDEX idx_forum_replies_author (author_id)
+) ENGINE=InnoDB;
+
+-- Seed the 20-unit catalogue used by the current React frontend.
+-- A level must exist before these records can be inserted.
+-- After creating a level, use the following INSERT template with its ID:
+-- INSERT INTO units (level_id, unit_number, unit_code, title, status) VALUES (...);
