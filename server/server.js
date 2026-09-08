@@ -25,7 +25,21 @@ app.use(express.json({ limit: '2mb' }))
 app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1')
-    res.json({ status: 'ok', database: 'connected' })
+    const [[counts]] = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM users) AS users,
+        (SELECT COUNT(*) FROM levels) AS levels,
+        (SELECT COUNT(*) FROM units) AS units,
+        (SELECT COUNT(*) FROM assessments) AS assessments,
+        (SELECT COUNT(*) FROM announcements) AS announcements,
+        (SELECT COUNT(*) FROM forum_topics) AS forum_topics
+    `)
+    res.json({
+      status: 'ok',
+      database: 'connected',
+      databaseName: process.env.DB_NAME || 'defaultdb',
+      counts: Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, Number(value)]))
+    })
   } catch (error) {
     console.error(error)
     res.status(503).json({ status: 'error', database: 'unavailable' })
