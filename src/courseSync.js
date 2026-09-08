@@ -62,23 +62,26 @@ function normalizeCourse(course = {}) {
           createdBy: topic.createdBy ?? topic.author_name ?? '',
           messages: Array.isArray(topic.messages)
             ? topic.messages
-            : topic.content
-              ? [{
-                  id: `opening-${topic.id}`,
-                  userId: topic.author_id,
-                  user: topic.author_name || '',
-                  text: topic.content,
-                  date: formatDate(topic.created_at)
-                }]
-              : Array.isArray(topic.replies)
-                ? topic.replies.map(reply => ({
-                    id: reply.id,
-                    userId: reply.author_id,
-                    user: reply.author_name || '',
-                    text: reply.content || '',
-                    date: formatDate(reply.created_at)
-                  }))
-                : []
+            : [
+                ...(topic.content
+                  ? [{
+                      id: `opening-${topic.id}`,
+                      userId: topic.author_id,
+                      user: topic.author_name || '',
+                      text: topic.content,
+                      date: formatDate(topic.created_at)
+                    }]
+                  : []),
+                ...(Array.isArray(topic.replies)
+                  ? topic.replies.map(reply => ({
+                      id: reply.id,
+                      userId: reply.author_id,
+                      user: reply.author_name || '',
+                      text: reply.content || '',
+                      date: formatDate(reply.created_at)
+                    }))
+                  : [])
+              ]
         }))
       : []
   }
