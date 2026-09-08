@@ -33,6 +33,12 @@ function same(a, b) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 }
 
+function formatDate(value) {
+  if (!value) return new Date().toLocaleString()
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString()
+}
+
 function normalizeCourse(course = {}) {
   return {
     title: course.title || '',
@@ -40,8 +46,41 @@ function normalizeCourse(course = {}) {
     manual: course.manual || '',
     units: Array.isArray(course.units) ? course.units : [],
     assessments: Array.isArray(course.assessments) ? course.assessments : [],
-    announcements: Array.isArray(course.announcements) ? course.announcements : [],
-    forums: Array.isArray(course.forums) ? course.forums : []
+    announcements: Array.isArray(course.announcements)
+      ? course.announcements.map(item => ({
+          id: item.id,
+          title: item.title || '',
+          message: item.message ?? item.content ?? '',
+          author: item.author ?? item.author_name ?? '',
+          date: item.date ?? formatDate(item.created_at)
+        }))
+      : [],
+    forums: Array.isArray(course.forums)
+      ? course.forums.map(topic => ({
+          id: topic.id,
+          topic: topic.topic ?? topic.title ?? '',
+          createdBy: topic.createdBy ?? topic.author_name ?? '',
+          messages: Array.isArray(topic.messages)
+            ? topic.messages
+            : topic.content
+              ? [{
+                  id: `opening-${topic.id}`,
+                  userId: topic.author_id,
+                  user: topic.author_name || '',
+                  text: topic.content,
+                  date: formatDate(topic.created_at)
+                }]
+              : Array.isArray(topic.replies)
+                ? topic.replies.map(reply => ({
+                    id: reply.id,
+                    userId: reply.author_id,
+                    user: reply.author_name || '',
+                    text: reply.content || '',
+                    date: formatDate(reply.created_at)
+                  }))
+                : []
+        }))
+      : []
   }
 }
 
@@ -118,7 +157,10 @@ async function syncCourse(nextCourse) {
       if (!previousAnnouncementIds.has(String(announcement.id))) {
         await request('/api/announcements', {
           method: 'POST',
-          body: JSON.stringify({ title: announcement.title, content: announcement.content })
+          body: JSON.stringify({
+            title: announcement.title,
+            content: announcement.message || announcement.content || ''
+          })
         })
       }
     }
@@ -126,29 +168,35 @@ async function syncCourse(nextCourse) {
     const previousTopicIds = new Set(previous.forums.map(topic => String(topic.id)))
     for (const topic of next.forums) {
       if (!previousTopicIds.has(String(topic.id))) {
+        const messages = Array.isArray(topic.messages) ? topic.messages : []
         const created = await request('/api/forum/topics', {
           method: 'POST',
-          body: JSON.stringify({ title: topic.title, content: topic.content })
+          body: JSON.stringify({
+            title: topic.topic || topic.title || '',
+            content: messages[0]?.text || topic.content || ''
+          })
         })
         const serverTopicId = created?.id
-        if (serverTopicId && Array.isArray(topic.replies)) {
-          for (const reply of topic.replies) {
-            await request(`/api/forum/topics/${serverTopicId}/replies`, {
-              method: 'POST',
-              body: JSON.stringify({ content: reply.content })
-            })
+        if (serverTopicId) {
+          for (const reply of messages.slice(1)) {
+            if (reply.text?.trim()) {
+              await request(`/api/forum/topics/${serverTopicId}/replies`, {
+                method: 'POST',
+                body: JSON.stringify({ content: reply.text })
+              })
+            }
           }
         }
       } else {
         const oldTopic = previous.forums.find(item => String(item.id) === String(topic.id))
-        const oldReplyIds = new Set((oldTopic?.replies || []).map(reply => String(reply.id)))
-        for (const reply of topic.replies || []) {
+        const oldReplyIds = new Set((oldTopic?.messages || []).map(reply => String(reply.id)))
+        for (const reply of topic.messages || []) {
           if (!oldReplyIds.has(String(reply.id))) {
             const topicId = String(topic.id).match(/^\d+$/) ? topic.id : null
-            if (topicId) {
+            if (topicId && reply.text?.trim()) {
               await request(`/api/forum/topics/${topicId}/replies`, {
                 method: 'POST',
-                body: JSON.stringify({ content: reply.content })
+                body: JSON.stringify({ content: reply.text })
               })
             }
           }
