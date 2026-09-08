@@ -7,6 +7,7 @@ let syncingFromServer = false
 let previousCourse = null
 let syncTimer = null
 let lastSyncedSignature = ''
+let storagePatched = false
 
 function token() {
   return sessionStorage.getItem(TOKEN_KEY)
@@ -18,10 +19,12 @@ async function request(path, options = {}) {
 
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
+    cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
-      Authorization: `Bearer ${currentToken}`
+      Authorization: `Bearer ${currentToken}`,
+      'Cache-Control': 'no-cache'
     }
   })
 
@@ -90,7 +93,7 @@ function normalizeCourse(course = {}) {
 
 async function fetchCourse() {
   if (!token()) return null
-  const body = await request('/api/course')
+  const body = await request(`/api/course?_=${Date.now()}`)
   return normalizeCourse(body?.course)
 }
 
@@ -228,31 +231,48 @@ async function syncCourse(nextCourse) {
 }
 
 export async function bootstrapCourseSync() {
-  if (!token()) return
+  if (!token()) return null
 
-  try {
-    const course = await fetchCourse()
-    if (course) {
-      previousCourse = course
-      writeCourse(course)
-      lastSyncedSignature = JSON.stringify(course)
-    }
-  } catch (error) {
-    console.warn('ELES course data could not be loaded from the server:', error.message)
-  }
+  let course = null
+  let lastError = null
 
-  const originalSetItem = localStorage.setItem.bind(localStorage)
-  localStorage.setItem = (key, value) => {
-    originalSetItem(key, value)
-    if (key !== KEY || syncingFromServer || !token()) return
-
+  // Mobile networks can briefly fail the first request after authentication.
+  // Retry a few times before falling back to the existing browser cache.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const parsed = JSON.parse(value)
-      if (!parsed?.course) return
-      clearTimeout(syncTimer)
-      syncTimer = setTimeout(() => syncCourse(parsed.course), 250)
-    } catch {
-      // Ignore unrelated/local malformed storage writes.
+      course = await fetchCourse()
+      if (course) break
+    } catch (error) {
+      lastError = error
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 400 * attempt))
     }
   }
+
+  if (course) {
+    previousCourse = course
+    writeCourse(course)
+    lastSyncedSignature = JSON.stringify(course)
+  } else if (lastError) {
+    console.warn('ELES course data could not be loaded from the server:', lastError.message)
+  }
+
+  if (!storagePatched) {
+    storagePatched = true
+    const originalSetItem = localStorage.setItem.bind(localStorage)
+    localStorage.setItem = (key, value) => {
+      originalSetItem(key, value)
+      if (key !== KEY || syncingFromServer || !token()) return
+
+      try {
+        const parsed = JSON.parse(value)
+        if (!parsed?.course) return
+        clearTimeout(syncTimer)
+        syncTimer = setTimeout(() => syncCourse(parsed.course), 250)
+      } catch {
+        // Ignore unrelated/local malformed storage writes.
+      }
+    }
+  }
+
+  return course
 }
