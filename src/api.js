@@ -52,8 +52,18 @@ export async function getCurrentUser() {
 }
 
 if (typeof window !== 'undefined') {
-  window.__elesLogin = async (email, password, role = 'student') => {
-    await login(email.trim().toLowerCase(), password, role)
-    window.location.reload()
+  window.__elesLogin = async (email, password) => {
+    const normalizedEmail = email.trim().toLowerCase()
+    let lastError
+    for (const role of ['student', 'instructor']) {
+      try {
+        await login(normalizedEmail, password, role)
+        window.location.reload()
+        return
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw lastError || new Error('Invalid email, password or account type.')
   }
 }
