@@ -47,10 +47,16 @@ export async function login(email, password, expectedRole = null) {
 
   saveToken(body.token)
 
-  // The application may be authenticating for the first time on a new device.
-  // Hydrate the shared course data immediately after the token exists so the
-  // dashboard does not depend on pre-existing browser localStorage.
+  // Fetch the authoritative course state after authentication. localStorage is
+  // only the browser cache; the course itself lives in the backend database.
   await bootstrapCourseSync()
+
+  // App.jsx initializes its React state before login. Reloading here makes the
+  // normal startup path run with an authenticated token, so the dashboard is
+  // rendered from the freshly hydrated server/database state on every device.
+  if (typeof window !== 'undefined') {
+    window.location.reload()
+  }
 
   return body.user
 }
@@ -62,6 +68,11 @@ export async function register(name, email, password, role) {
   })
   saveToken(body.token)
   await bootstrapCourseSync()
+
+  if (typeof window !== 'undefined') {
+    window.location.reload()
+  }
+
   return body.user
 }
 
@@ -78,7 +89,6 @@ if (typeof window !== 'undefined') {
       const activeRoleButton = document.querySelector('.role-switch button.active')
       const selectedRole = activeRoleButton?.textContent?.trim().toLowerCase()
       await login(email.trim().toLowerCase(), password, selectedRole === 'student' || selectedRole === 'instructor' ? selectedRole : null)
-      window.location.reload()
       return true
     } catch (error) {
       window.alert(error?.message || 'Invalid email or password.')
