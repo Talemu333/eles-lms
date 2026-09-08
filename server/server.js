@@ -30,15 +30,24 @@ app.get('/api/health', async (_req, res) => {
         (SELECT COUNT(*) FROM users) AS users,
         (SELECT COUNT(*) FROM levels) AS levels,
         (SELECT COUNT(*) FROM units) AS units,
+        (SELECT COUNT(*) FROM units WHERE instructor_id IS NOT NULL) AS assigned_units,
         (SELECT COUNT(*) FROM assessments) AS assessments,
         (SELECT COUNT(*) FROM announcements) AS announcements,
         (SELECT COUNT(*) FROM forum_topics) AS forum_topics
     `)
+    const [[level]] = await pool.query('SELECT id, title, description FROM levels ORDER BY id LIMIT 1')
+    const [assessmentRows] = await pool.query('SELECT id, type FROM assessments ORDER BY id')
     res.json({
       status: 'ok',
       database: 'connected',
       databaseName: process.env.DB_NAME || 'defaultdb',
-      counts: Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, Number(value)]))
+      course: {
+        levelId: level?.id ?? null,
+        title: level?.title || '',
+        description: level?.description || ''
+      },
+      counts: Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, Number(value)])),
+      assessmentTypes: assessmentRows.map(item => item.type)
     })
   } catch (error) {
     console.error(error)
@@ -181,9 +190,10 @@ app.put('/api/course/level', requireAuth, requireRole('instructor'), async (req,
 
 app.put('/api/course/manual', requireAuth, requireRole('instructor'), async (req, res) => {
   try {
-    const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    if (!level) return res.status(400).json({ message: 'Create a level before saving the teaching manual.' })
-    await pool.query('UPDATE levels SET teaching_manual = ? WHERE id = ?', [String(req.body.manual || '').trim(), level.id])
+    const { manual = '' } = req.body
+    const [[existing]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
+    if (!existing) return res.status(400).json({ message: 'Set a level first.' })
+    await pool.query('UPDATE levels SET teaching_manual = ? WHERE id = ?', [String(manual), existing.id])
     res.json({ message: 'Teaching manual saved.' })
   } catch (error) {
     console.error(error)
@@ -192,26 +202,26 @@ app.put('/api/course/manual', requireAuth, requireRole('instructor'), async (req
 })
 
 app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req, res) => {
+  const { unitId, reference = '', title, status = 'Mandatory', description = '' } = req.body
+  if (!Number.isInteger(Number(unitId)) || !String(title || '').trim()) return res.status(400).json({ message: 'Unit number and title are required.' })
   try {
-    const { unitId, title, status, description = '', reference } = req.body
-    const unitNumber = Number(unitId)
-    if (!Number.isInteger(unitNumber) || unitNumber < 1 || unitNumber > 20 || !String(title || '').trim()) {
-      return res.status(400).json({ message: 'Valid unit number and title are required.' })
-    }
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    if (!level) return res.status(400).json({ message: 'Create a level before adding units.' })
-
-    const code = String(reference || '').trim() || `UNIT-${String(unitNumber).padStart(2, '0')}`
-    const [existing] = await pool.query('SELECT id, instructor_id FROM units WHERE level_id = ? AND unit_number = ? LIMIT 1', [level.id, unitNumber])
-    if (existing.length && existing[0].instructor_id && Number(existing[0].instructor_id) !== Number(req.user.id)) {
+    if (!level) return res.status(400).json({ message: 'Set a level first.' })
+    const [[existing]] = await pool.query('SELECT id, instructor_id FROM units WHERE level_id = ? AND unit_number = ? LIMIT 1', [level.id, Number(unitId)])
+    if (existing && existing.instructor_id && Number(existing.instructor_id) !== Number(req.user.id)) {
       return res.status(409).json({ message: 'This unit is already assigned to another instructor.' })
     }
-
-    if (existing.length) {
-      await pool.query('UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?', [code, String(title).trim(), status, String(description).trim(), req.user.id, existing[0].id])
+    if (existing) {
+      await pool.query(
+        'UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?',
+        [String(reference), String(title).trim(), String(status), String(description), req.user.id, existing.id]
+      )
       return res.json({ message: 'Unit saved.' })
     }
-    await pool.query('INSERT INTO units (level_id, unit_number, unit_code, title, status, description, instructor_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [level.id, unitNumber, code, String(title).trim(), status, String(description).trim(), req.user.id])
+    await pool.query(
+      'INSERT INTO units (level_id, unit_number, unit_code, title, status, description, instructor_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [level.id, Number(unitId), String(reference), String(title).trim(), String(status), String(description), req.user.id]
+    )
     res.status(201).json({ message: 'Unit saved.' })
   } catch (error) {
     console.error(error)
@@ -221,13 +231,13 @@ app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req
 
 app.put('/api/course/assessments', requireAuth, requireRole('instructor'), async (req, res) => {
   try {
-    const types = Array.isArray(req.body.types) ? req.body.types : []
-    const valid = ['Direct Observation', 'Question and Answer', 'Personal Statement', 'Work Practice']
-    if (types.some(type => !valid.includes(type))) return res.status(400).json({ message: 'Invalid assessment method.' })
+    const { types = [] } = req.body
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    if (!level) return res.status(400).json({ message: 'Create a level before selecting assessment methods.' })
+    if (!level) return res.status(400).json({ message: 'Set a level first.' })
     await pool.query('DELETE FROM assessments WHERE level_id = ?', [level.id])
-    for (const type of [...new Set(types)]) await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
+    for (const type of [...new Set(types.map(value => String(value).trim()).filter(Boolean))]) {
+      await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
+    }
     res.json({ message: 'Assessment methods saved.' })
   } catch (error) {
     console.error(error)
@@ -237,47 +247,49 @@ app.put('/api/course/assessments', requireAuth, requireRole('instructor'), async
 
 app.post('/api/announcements', requireAuth, requireRole('instructor'), async (req, res) => {
   try {
-    const { title, content } = req.body
-    if (!String(title || '').trim() || !String(content || '').trim()) return res.status(400).json({ message: 'Title and content are required.' })
+    const { title, content = '' } = req.body
+    if (!String(title || '').trim()) return res.status(400).json({ message: 'Announcement title is required.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    const [result] = await pool.query('INSERT INTO announcements (level_id, title, content, author_id) VALUES (?, ?, ?, ?)', [level?.id || null, String(title).trim(), String(content).trim(), req.user.id])
-    res.status(201).json({ id: result.insertId, message: 'Announcement created.' })
+    const [result] = await pool.query(
+      'INSERT INTO announcements (level_id, author_id, title, content) VALUES (?, ?, ?, ?)',
+      [level?.id || null, req.user.id, String(title).trim(), String(content)]
+    )
+    res.status(201).json({ id: result.insertId, message: 'Announcement posted.' })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'Unable to create announcement.' })
+    res.status(500).json({ message: 'Unable to post announcement.' })
   }
 })
 
 app.post('/api/forum/topics', requireAuth, async (req, res) => {
   try {
-    const { title, content } = req.body
-    if (!String(title || '').trim() || !String(content || '').trim()) return res.status(400).json({ message: 'Title and content are required.' })
+    const { title, content = '' } = req.body
+    if (!String(title || '').trim()) return res.status(400).json({ message: 'Topic title is required.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    const [result] = await pool.query('INSERT INTO forum_topics (level_id, title, content, author_id) VALUES (?, ?, ?, ?)', [level?.id || null, String(title).trim(), String(content).trim(), req.user.id])
-    res.status(201).json({ id: result.insertId, message: 'Topic created.' })
+    const [result] = await pool.query(
+      'INSERT INTO forum_topics (level_id, author_id, title, content) VALUES (?, ?, ?, ?)',
+      [level?.id || null, req.user.id, String(title).trim(), String(content)]
+    )
+    res.status(201).json({ id: result.insertId, message: 'Forum topic posted.' })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'Unable to create topic.' })
+    res.status(500).json({ message: 'Unable to post forum topic.' })
   }
 })
 
 app.post('/api/forum/topics/:topicId/replies', requireAuth, async (req, res) => {
   try {
-    const { content } = req.body
-    if (!String(content || '').trim()) return res.status(400).json({ message: 'Reply content is required.' })
-    const [topic] = await pool.query('SELECT id FROM forum_topics WHERE id = ? LIMIT 1', [req.params.topicId])
-    if (!topic.length) return res.status(404).json({ message: 'Forum topic not found.' })
-    const [result] = await pool.query('INSERT INTO forum_replies (topic_id, content, author_id) VALUES (?, ?, ?)', [req.params.topicId, String(content).trim(), req.user.id])
-    res.status(201).json({ id: result.insertId, message: 'Reply added.' })
+    const { content = '' } = req.body
+    if (!String(content).trim()) return res.status(400).json({ message: 'Reply content is required.' })
+    const [result] = await pool.query(
+      'INSERT INTO forum_replies (topic_id, author_id, content) VALUES (?, ?, ?)',
+      [req.params.topicId, req.user.id, String(content)]
+    )
+    res.status(201).json({ id: result.insertId, message: 'Reply posted.' })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'Unable to add reply.' })
+    res.status(500).json({ message: 'Unable to post reply.' })
   }
 })
 
-app.use((error, _req, res, _next) => {
-  console.error(error)
-  res.status(500).json({ message: 'Server error.' })
-})
-
-app.listen(port, () => console.log(`ELES LMS API running on port ${port}`))
+app.listen(port, () => console.log(`ELES API listening on ${port}`))
