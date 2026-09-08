@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react'
 import { clearToken, getCurrentUser, login as apiLogin, register as apiRegister, getToken } from './api.js'
-import { bootstrapCourseSync } from './courseSync.js'
+import { bootstrapCourseSync, syncCourse } from './courseSync.js'
 
-const KEY='els_lms_data_v11'
-const LEGACY_KEYS=['els_lms_data_v10','els_lms_data_v9','els_lms_data_v8','els_lms_data_v7']
 const assessmentTypes=['Direct Observation','Question and Answer','Personal Statement','Work Practice']
 const unitCatalog=[
 {id:'01',reference:'SCD/CCD/001/L2',title:'Introduction to the role of early years practitioner',type:'Mandatory'},
@@ -29,14 +27,12 @@ const unitCatalog=[
 
 const defaultData={users:[],course:{title:'',description:'',manual:'',units:[],assessments:[],announcements:[],forums:[]}}
 
-function loadData(){const x=localStorage.getItem(KEY);if(!x){const d=structuredClone(defaultData);for(const k of LEGACY_KEYS){try{const old=JSON.parse(localStorage.getItem(k)||'null');if(old?.course){d.course={...d.course,...old.course,announcements:Array.isArray(old.course.announcements)?old.course.announcements:[],units:Array.isArray(old.course.units)?old.course.units:[],assessments:Array.isArray(old.course.assessments)?old.course.assessments:[],forums:Array.isArray(old.course.forums)?old.course.forums:[]};break}}catch{}}localStorage.setItem(KEY,JSON.stringify(d));return d}return JSON.parse(x)}
-function persist(d){localStorage.setItem(KEY,JSON.stringify(d))}
 function uid(p='id'){return p+Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
 
 function Field({label,children}){return <div className="form-group"><label>{label}</label>{children}</div>}
 
 export default function App(){
- const [data,setData]=useState(loadData)
+ const [data,setData]=useState(defaultData)
  const [user,setUser]=useState(null)
  const [authChecked,setAuthChecked]=useState(false)
  const [courseHydrated,setCourseHydrated]=useState(false)
@@ -46,21 +42,17 @@ export default function App(){
  const [modal,setModal]=useState(null)
  const [message,setMessage]=useState('')
 
- // localStorage is only a cache. Never overwrite the server course with the
- // initial empty browser state before the authenticated server state is loaded.
- useEffect(()=>{if(courseHydrated)persist(data)},[data,courseHydrated])
-
+ // Course content is server-owned. Browser storage is never used to initialize
+ // or persist course data, so every device receives the same Aiven-backed state.
  const hydrateCourse=async()=>{
    const course=await bootstrapCourseSync()
-   if(course){
-     setData(prev=>({...prev,course}))
-   }
+   if(course)setData(prev=>({...prev,course}))
    setCourseHydrated(true)
    return course
  }
 
  useEffect(()=>{let active=true;(async()=>{
-   if(!getToken()){if(active)setCourseHydrated(true);if(active)setAuthChecked(true);return}
+   if(!getToken()){if(active){setCourseHydrated(true);setAuthChecked(true)};return}
    try{
      const current=await getCurrentUser()
      const course=await bootstrapCourseSync()
@@ -76,7 +68,16 @@ export default function App(){
    }finally{if(active)setAuthChecked(true)}
  })();return()=>{active=false}},[])
 
- const update=fn=>setData(prev=>{const next=structuredClone(prev);fn(next);persist(next);return next})
+ const update=fn=>{
+   const next=structuredClone(data)
+   fn(next)
+   setData(next)
+   if(user?.role==='instructor'){
+     syncCourse(next.course)
+       .then(serverCourse=>{if(serverCourse)setData(prev=>({...prev,course:serverCourse}))})
+       .catch(error=>setMessage(error.message||'Unable to save changes to the server.'))
+   }
+ }
  const login=async(email,password)=>{try{
    const u=await apiLogin(email.trim().toLowerCase(),password,role)
    const course=await hydrateCourse()
@@ -89,7 +90,7 @@ export default function App(){
    if(course)setData(prev=>({...prev,course}))
    setUser(u);setMessage('');setPage('dashboard')
  }catch(error){setMessage(error.message||'Unable to create account.')}}
- const logout=()=>{clearToken();setUser(null);setAuthView('login');setPage('dashboard');setCourseHydrated(true)}
+ const logout=()=>{clearToken();setUser(null);setData(defaultData);setAuthView('login');setPage('dashboard');setCourseHydrated(true)}
  if(!authChecked)return <div className="auth"><div className="auth-box"><h1>Early Learning Services</h1><p className="muted">Checking your session...</p></div></div>
  if(!user)return <Auth role={role} setRole={setRole} view={authView} setView={setAuthView} onLogin={login} registerUser={registerUser} message={message} setMessage={setMessage}/>
  return <div className="app"><header className="topbar"><div className="brand"><i className="fa-solid fa-graduation-cap"></i> Early Learning Services</div><div className="user-area"><span>{user.name}</span><div className="avatar">{user.name[0].toUpperCase()}</div><button className="btn btn-light" onClick={logout}>Logout</button></div></header><div className="layout"><aside className="sidebar"><div className="nav-title">Main Menu</div><nav className="nav"><Nav label="Dashboard" icon="fa-house" onClick={()=>setPage('dashboard')}/><Nav label="Teaching Manual" icon="fa-book" onClick={()=>setPage('teachingManual')}/><Nav label="Announcements" icon="fa-bullhorn" onClick={()=>setPage('announcements')}/><Nav label="Forum" icon="fa-comments" onClick={()=>setPage('forum')}/>{user.role==='instructor'&&<><Nav label="Level" icon="fa-layer-group" onClick={()=>setPage('level')}/><Nav label="Add Units" icon="fa-circle-plus" onClick={()=>setPage('units')}/><Nav label="Assessment Methods" icon="fa-clipboard-check" onClick={()=>setPage('assessments')}/></>}</nav></aside><main className="main"><Page page={page} user={user} data={data} update={update} openModal={setModal}/></main></div>{modal&&<Modal modal={modal} close={()=>setModal(null)} user={user} update={update} data={data}/>}</div>
@@ -109,7 +110,7 @@ function Page({page,user,data,update,openModal}){switch(page){case'teachingManua
 
 function Dashboard({user,data}){const c=data.course;return <><h1 className="page-title">{user.role==='student'?'Student':'Instructor'} Dashboard</h1><p className="muted">Your course overview.</p><div className="cards"><div className="card"><div className="muted"><i className="fa-solid fa-layer-group stat-icon"></i>Level Courses</div><div className="stat">{c.title?1:0}</div>{c.title?<div className="info-box"><strong>{c.title}</strong><p>{c.description||'No description added yet.'}</p></div>:<p className="muted" style={{marginTop:12}}>No level has been set.</p>}</div><div className="card"><div className="muted"><i className="fa-solid fa-cubes stat-icon"></i>Units</div><div className="stat">{c.units.length}</div>{c.units.length?<div className="info-box">{c.units.map(u=><div key={u.id} style={{marginBottom:10}}><strong>{u.number}: {u.title}</strong> <span className="badge">{u.status}</span><p>{u.description||'Description to be added by the instructor.'}</p><small className="muted">Instructor: {u.instructorName||'Not assigned'}</small></div>)}</div>:<p className="muted" style={{marginTop:12}}>No units have been selected.</p>}</div><div className="card"><div className="muted"><i className="fa-solid fa-clipboard-check stat-icon"></i>Assessment Methods</div><div className="stat">{c.assessments.length}</div>{c.assessments.length?<div className="info-box">{c.assessments.map(a=><div key={a.id}>{a.type}</div>)}</div>:<p className="muted" style={{marginTop:12}}>No assessment methods have been selected.</p>}</div></div></>}
 
-function Manual({user,data,update}){const [text,setText]=useState(data.course.manual||'');return <><h1 className="page-title">Teaching Manual</h1><p className="muted">{user.role==='instructor'?'Type or paste the course outline/manual below. It is saved in this browser and visible to students.':'Your instructor’s course outline is shown below.'}</p><div className="card">{user.role==='instructor'?<><Field label="Course outline / teaching manual"><textarea placeholder="Type or paste the teaching manual here..." value={text} onChange={e=>setText(e.target.value)}/></Field><button className="btn btn-primary" onClick={()=>{update(d=>d.course.manual=text.trim());alert('Teaching manual saved.')}}>Save Teaching Manual</button></>:data.course.manual?<div style={{whiteSpace:'pre-wrap'}}>{data.course.manual}</div>:<div className="empty">The teaching manual has not been added yet.</div>}</div></>}
+function Manual({user,data,update}){const [text,setText]=useState(data.course.manual||'');return <><h1 className="page-title">Teaching Manual</h1><p className="muted">{user.role==='instructor'?'Type or paste the course outline/manual below. It is saved on the server and visible to students.':'Your instructor’s course outline is shown below.'}</p><div className="card">{user.role==='instructor'?<><Field label="Course outline / teaching manual"><textarea placeholder="Type or paste the teaching manual here..." value={text} onChange={e=>setText(e.target.value)}/></Field><button className="btn btn-primary" onClick={()=>{update(d=>d.course.manual=text.trim());alert('Teaching manual saved.')}}>Save Teaching Manual</button></>:data.course.manual?<div style={{whiteSpace:'pre-wrap'}}>{data.course.manual}</div>:<div className="empty">The teaching manual has not been added yet.</div>}</div></>}
 
 function Level({data,update}){const [title,setTitle]=useState(data.course.title),[desc,setDesc]=useState(data.course.description);return <><h1 className="page-title">Level</h1><p className="muted">Set the title and description students will see in their dashboard.</p><div className="card"><Field label="Level title"><input placeholder="e.g. Level 2" value={title} onChange={e=>setTitle(e.target.value)}/></Field><Field label="Level description"><textarea placeholder="Describe this level..." value={desc} onChange={e=>setDesc(e.target.value)}/></Field><button className="btn btn-primary" onClick={()=>{if(!title.trim())return alert('Enter a level title.');update(d=>{d.course.title=title.trim();d.course.description=desc.trim()});alert('Level saved.')}}>Save Level</button></div></>}
 
@@ -120,6 +121,6 @@ function Assessments({user,data,update}){const [type,setType]=useState(assessmen
 function Announcements({user,data,openModal}){return <><h1 className="page-title">Announcements</h1><p className="muted">{user.role==='instructor'?'Create announcements for all students.':'Announcements from your instructors appear here.'}</p>{user.role==='instructor'&&<button className="btn btn-primary" onClick={()=>openModal('announcement')}><i className="fa-solid fa-bullhorn"></i> Create Announcement</button>}<div className="section">{data.course.announcements?.length?data.course.announcements.map(a=><div className="card" style={{marginBottom:12}} key={a.id}><strong>{a.title}</strong><p style={{marginTop:8,whiteSpace:'pre-wrap'}}>{a.message}</p><small className="muted">Posted by {a.author} · {a.date}</small></div>):<div className="card empty">No announcements yet.</div>}</div></>}
 
 function Forum({user,data,update,openModal}){return <><h1 className="page-title">Forum</h1><p className="muted">{user.role==='instructor'?'Create topics and reply to students.':'Join your instructor’s forum topics and respond in chat.'}</p>{user.role==='instructor'&&<button className="btn btn-primary" onClick={()=>openModal('topic')}>Create Forum Topic</button>}<div className="section">{data.course.forums.length?data.course.forums.map(f=><ForumCard key={f.id} f={f} user={user} update={update}/>):<div className="card empty">No forum topics have been created yet.</div>}</div></>}
-function ForumCard({f,user,update}){const [text,setText]=useState('');return <div className="card" style={{marginBottom:18}}><div className="section-head"><h2>{f.topic}</h2><span className="badge">Created by {f.createdBy}</span></div><div className="chat">{f.messages.length?f.messages.map(m=><div key={m.id} className={`chat-message ${m.userId===user.id?'mine':''}`}><strong>{m.user}</strong><div>{m.text}</div><small>{m.date}</small></div>):<div className="empty">No responses yet.</div>}</div><Field label="Chat response"><textarea placeholder="Write a response..." value={text} onChange={e=>setText(e.target.value)}/></Field><button className="btn btn-primary" onClick={()=>{if(!text.trim())return alert('Write a response.');update(d=>{const x=d.course.forums.find(x=>x.id===f.id);x.messages.push({id:uid('msg'),userId:user.id,user:user.name,text:text.trim(),date:new Date().toLocaleString()})});setText('')}}>Send Response</button></div>}
+function ForumCard({f,user,update}){const [text,setText]=useState('');return <div className="card" style={{marginBottom:18}}><div className="section-head"><h2>{f.topic}</h2><span className="badge">Created by {f.createdBy}</span></div><div className="chat">{f.messages.length?f.messages.map(m=><div key={m.id} className={`chat-message ${m.userId===user.id?'mine':''}`}><strong>{m.user}</strong><div>{m.text}</div><small>{m.date}</small></div>):<div className="empty">No responses yet.</div>}</div><Field label="Chat response"><textarea placeholder="Write a response..." value={text} onChange={e=>setText(e.target.value)}/></Field><button className="btn btn-primary" onClick={()=>{if(!text.trim())return alert('Write a response.');update(d=>{const x=d.course.forums.find(x=>x.id===f.id);if(x)x.messages.push({id:uid('msg'),userId:user.id,user:user.name,text:text.trim(),date:new Date().toLocaleString()})});setText('')}}>Send Response</button></div>}
 
 function Modal({modal,close,user,update}){const [title,setTitle]=useState(''),[text,setText]=useState('');const save=()=>{if(modal==='announcement'){if(!title.trim()||!text.trim())return alert('Enter an announcement title and message.');update(d=>d.course.announcements.unshift({id:uid('announcement'),title:title.trim(),message:text.trim(),author:user.name,date:new Date().toLocaleString()}))}else{if(!title.trim())return alert('Enter a topic title.');update(d=>{const f={id:uid('forum'),topic:title.trim(),createdBy:user.name,messages:[]};if(text.trim())f.messages.push({id:uid('msg'),userId:user.id,user:user.name,text:text.trim(),date:new Date().toLocaleString()});d.course.forums.unshift(f)})}close()};return <div className="modal" onClick={e=>e.target===e.currentTarget&&close()}><div className="modal-box"><h2>{modal==='announcement'?'Create Announcement':'Create Forum Topic'}</h2><Field label={modal==='announcement'?'Announcement title':'Topic'}><input placeholder={modal==='announcement'?'Enter a title':'Enter a topic title'} value={title} onChange={e=>setTitle(e.target.value)}/></Field><Field label={modal==='announcement'?'Message':'Opening message'}><textarea placeholder={modal==='announcement'?'Write the announcement...':'Start the discussion...'} value={text} onChange={e=>setText(e.target.value)}/></Field><div className="modal-actions"><button className="btn btn-light" onClick={close}>Cancel</button><button className="btn btn-primary" onClick={save}>{modal==='announcement'?'Publish Announcement':'Create Topic'}</button></div></div></div>}
