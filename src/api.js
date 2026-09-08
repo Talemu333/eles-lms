@@ -28,11 +28,21 @@ async function request(path, options = {}) {
   return body
 }
 
-export async function login(email, password) {
+// Role is deliberately NOT sent to the backend during login.
+// The backend authenticates from email/password and returns the user's role.
+// The selected Student/Instructor mode remains a frontend login context and
+// is checked against the authenticated user's returned role.
+export async function login(email, password, expectedRole = null) {
   const body = await request('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password })
   })
+
+  if (expectedRole && body.user?.role !== expectedRole) {
+    clearToken()
+    throw new Error(`This account is registered as ${body.user?.role === 'instructor' ? 'an instructor' : 'a student'}. Please select the correct account type.`)
+  }
+
   saveToken(body.token)
   return body.user
 }
@@ -54,7 +64,11 @@ export async function getCurrentUser() {
 if (typeof window !== 'undefined') {
   window.__elesLogin = async (email, password) => {
     try {
-      await login(email.trim().toLowerCase(), password)
+      // Keep the original Student/Instructor switch as the login context,
+      // while the backend itself remains role-independent at authentication time.
+      const activeRoleButton = document.querySelector('.role-switch button.active')
+      const selectedRole = activeRoleButton?.textContent?.trim().toLowerCase()
+      await login(email.trim().toLowerCase(), password, selectedRole === 'student' || selectedRole === 'instructor' ? selectedRole : null)
       window.location.reload()
       return true
     } catch (error) {
