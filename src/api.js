@@ -50,3 +50,10 @@ export async function getCurrentUser() {
   const body = await request('/api/auth/me')
   return body.user
 }
+
+if (typeof window !== 'undefined') {
+  window.__elesLogin = async (email, password, role = 'student') => {
+    await login(email.trim().toLowerCase(), password, role)
+    window.location.reload()
+  }
+}
