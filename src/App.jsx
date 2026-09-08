@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { clearToken, getCurrentUser, login as apiLogin, register as apiRegister, getToken } from './api.js'
+import { bootstrapCourseSync } from './courseSync.js'
 
 const KEY='els_lms_data_v11'
 const LEGACY_KEYS=['els_lms_data_v10','els_lms_data_v9','els_lms_data_v8','els_lms_data_v7']
@@ -38,27 +39,68 @@ export default function App(){
  const [data,setData]=useState(loadData)
  const [user,setUser]=useState(null)
  const [authChecked,setAuthChecked]=useState(false)
+ const [courseHydrated,setCourseHydrated]=useState(false)
  const [role,setRole]=useState('student')
  const [authView,setAuthView]=useState('login')
  const [page,setPage]=useState('dashboard')
  const [modal,setModal]=useState(null)
  const [message,setMessage]=useState('')
- useEffect(()=>{persist(data)},[data])
- useEffect(()=>{let active=true;(async()=>{if(!getToken()){if(active)setAuthChecked(true);return}try{const current=await getCurrentUser();if(active){setUser(current);setRole(current.role)}}catch{clearToken()}finally{if(active)setAuthChecked(true)}})();return()=>{active=false}},[])
+
+ // localStorage is only a cache. Never overwrite the server course with the
+ // initial empty browser state before the authenticated server state is loaded.
+ useEffect(()=>{if(courseHydrated)persist(data)},[data,courseHydrated])
+
+ const hydrateCourse=async()=>{
+   const course=await bootstrapCourseSync()
+   if(course){
+     setData(prev=>({...prev,course}))
+   }
+   setCourseHydrated(true)
+   return course
+ }
+
+ useEffect(()=>{let active=true;(async()=>{
+   if(!getToken()){if(active)setCourseHydrated(true);if(active)setAuthChecked(true);return}
+   try{
+     const current=await getCurrentUser()
+     const course=await bootstrapCourseSync()
+     if(active){
+       setUser(current)
+       setRole(current.role)
+       if(course)setData(prev=>({...prev,course}))
+       setCourseHydrated(true)
+     }
+   }catch(error){
+     clearToken()
+     if(active){setMessage(error.message||'Your session has expired. Please log in again.');setCourseHydrated(true)}
+   }finally{if(active)setAuthChecked(true)}
+ })();return()=>{active=false}},[])
+
  const update=fn=>setData(prev=>{const next=structuredClone(prev);fn(next);persist(next);return next})
- const login=async(email,password)=>{try{const u=await apiLogin(email.trim().toLowerCase(),password,role);setMessage('');setUser(u);setPage('dashboard')}catch(error){setMessage(error.message||'Invalid email, password or account type.')}}
- const logout=()=>{clearToken();setUser(null);setAuthView('login');setPage('dashboard')}
+ const login=async(email,password)=>{try{
+   const u=await apiLogin(email.trim().toLowerCase(),password,role)
+   const course=await hydrateCourse()
+   if(course)setData(prev=>({...prev,course}))
+   setMessage('');setUser(u);setPage('dashboard')
+ }catch(error){setMessage(error.message||'Invalid email, password or account type.')}}
+ const registerUser=async(name,email,password)=>{try{
+   const u=await apiRegister(name.trim(),email.trim().toLowerCase(),password,role)
+   const course=await hydrateCourse()
+   if(course)setData(prev=>({...prev,course}))
+   setUser(u);setMessage('');setPage('dashboard')
+ }catch(error){setMessage(error.message||'Unable to create account.')}}
+ const logout=()=>{clearToken();setUser(null);setAuthView('login');setPage('dashboard');setCourseHydrated(true)}
  if(!authChecked)return <div className="auth"><div className="auth-box"><h1>Early Learning Services</h1><p className="muted">Checking your session...</p></div></div>
- if(!user)return <Auth role={role} setRole={setRole} view={authView} setView={setAuthView} registerUser={async(name,email,password)=>{try{const u=await apiRegister(name.trim(),email.trim().toLowerCase(),password,role);setUser(u);setMessage('');setPage('dashboard')}catch(error){setMessage(error.message||'Unable to create account.')}}} message={message} setMessage={setMessage}/>
+ if(!user)return <Auth role={role} setRole={setRole} view={authView} setView={setAuthView} onLogin={login} registerUser={registerUser} message={message} setMessage={setMessage}/>
  return <div className="app"><header className="topbar"><div className="brand"><i className="fa-solid fa-graduation-cap"></i> Early Learning Services</div><div className="user-area"><span>{user.name}</span><div className="avatar">{user.name[0].toUpperCase()}</div><button className="btn btn-light" onClick={logout}>Logout</button></div></header><div className="layout"><aside className="sidebar"><div className="nav-title">Main Menu</div><nav className="nav"><Nav label="Dashboard" icon="fa-house" onClick={()=>setPage('dashboard')}/><Nav label="Teaching Manual" icon="fa-book" onClick={()=>setPage('teachingManual')}/><Nav label="Announcements" icon="fa-bullhorn" onClick={()=>setPage('announcements')}/><Nav label="Forum" icon="fa-comments" onClick={()=>setPage('forum')}/>{user.role==='instructor'&&<><Nav label="Level" icon="fa-layer-group" onClick={()=>setPage('level')}/><Nav label="Add Units" icon="fa-circle-plus" onClick={()=>setPage('units')}/><Nav label="Assessment Methods" icon="fa-clipboard-check" onClick={()=>setPage('assessments')}/></>}</nav></aside><main className="main"><Page page={page} user={user} data={data} update={update} openModal={setModal}/></main></div>{modal&&<Modal modal={modal} close={()=>setModal(null)} user={user} update={update} data={data}/>}</div>
 }
 
 function Nav({label,icon,onClick}){return <button onClick={onClick}><i className={`fa-solid ${icon} icon`}></i>{label}</button>}
 
-function Auth({role,setRole,view,setView,registerUser,message,setMessage}){
+function Auth({role,setRole,view,setView,onLogin,registerUser,message,setMessage}){
  const [name,setName]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(''),[resetEmail,setResetEmail]=useState(''),[busy,setBusy]=useState(false)
  const register=async()=>{if(!name.trim()||!email.trim()||!password)return setMessage('Please complete all fields.');setBusy(true);try{await registerUser(name,email,password)}finally{setBusy(false)}}
- const login=async()=>{if(!email.trim()||!password)return setMessage('Please enter your email and password.');setBusy(true);try{await window.__elesLogin?.(email,password)}finally{setBusy(false)}}
+ const login=async()=>{if(!email.trim()||!password)return setMessage('Please enter your email and password.');setBusy(true);try{await onLogin(email,password)}finally{setBusy(false)}}
  const reset=()=>{setMessage('Password reset is not connected yet. Please contact an administrator.');setView('login')}
  return <div className="auth"><div className="auth-box"><h1>Early Learning Services</h1><p className="muted"><i className="fa-solid fa-child-reaching"></i> Early Childhood Learning Management System</p><div className="role-switch"><button className={role==='student'?'active':''} onClick={()=>{setRole('student');setMessage('')}}>Student</button><button className={role==='instructor'?'active':''} onClick={()=>{setRole('instructor');setMessage('')}}>Instructor</button></div>{message&&<div className="info-box">{message}</div>}{view==='login'&&<><Field label="Email"><input type="email" placeholder="Enter email" value={email} onChange={e=>setEmail(e.target.value)} disabled={busy}/></Field><Field label="Password"><input type="password" placeholder="Enter password" value={password} onChange={e=>setPassword(e.target.value)} disabled={busy}/></Field><button className="btn btn-primary" onClick={login} disabled={busy}><i className="fa-solid fa-right-to-bracket"></i> {busy?'Logging in...':'Login'}</button><button className="btn btn-light" onClick={()=>{setView('register');setMessage('')}} disabled={busy}>Create Account</button><p style={{textAlign:'center',marginTop:16}}><a href="#reset" onClick={e=>{e.preventDefault();setView('reset');setMessage('')}}>Forgot Password?</a></p></>}{view==='register'&&<><Field label="Full Name"><input value={name} onChange={e=>setName(e.target.value)} disabled={busy}/></Field><Field label="Email"><input type="email" value={email} onChange={e=>setEmail(e.target.value)} disabled={busy}/></Field><Field label="Password"><input type="password" value={password} onChange={e=>setPassword(e.target.value)} disabled={busy}/></Field><button className="btn btn-primary" onClick={register} disabled={busy}>{busy?'Creating Account...':'Create Account'}</button><button className="btn btn-light" onClick={()=>{setView('login');setMessage('')}} disabled={busy}>Back to Login</button></>}{view==='reset'&&<><p className="muted">Enter your email to reset your password.</p><Field label="Email"><input type="email" value={resetEmail} onChange={e=>setResetEmail(e.target.value)}/></Field><button className="btn btn-primary" onClick={reset}>Send Reset Link</button><button className="btn btn-light" onClick={()=>{setView('login');setMessage('')}}>Back to Login</button></>}</div></div>
 }
