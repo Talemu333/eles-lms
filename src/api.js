@@ -1,5 +1,3 @@
-import { bootstrapCourseSync } from './courseSync.js'
-
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/$/, '')
 const TOKEN_KEY = 'eles_auth_token'
 
@@ -46,18 +44,6 @@ export async function login(email, password, expectedRole = null) {
   }
 
   saveToken(body.token)
-
-  // Fetch the authoritative course state after authentication. localStorage is
-  // only the browser cache; the course itself lives in the backend database.
-  await bootstrapCourseSync()
-
-  // App.jsx initializes its React state before login. Reloading here makes the
-  // normal startup path run with an authenticated token, so the dashboard is
-  // rendered from the freshly hydrated server/database state on every device.
-  if (typeof window !== 'undefined') {
-    window.location.reload()
-  }
-
   return body.user
 }
 
@@ -67,12 +53,6 @@ export async function register(name, email, password, role) {
     body: JSON.stringify({ name, email, password, role })
   })
   saveToken(body.token)
-  await bootstrapCourseSync()
-
-  if (typeof window !== 'undefined') {
-    window.location.reload()
-  }
-
   return body.user
 }
 
@@ -84,12 +64,13 @@ export async function getCurrentUser() {
 if (typeof window !== 'undefined') {
   window.__elesLogin = async (email, password) => {
     try {
-      // Keep the original Student/Instructor switch as the login context,
-      // while the backend itself remains role-independent at authentication time.
       const activeRoleButton = document.querySelector('.role-switch button.active')
       const selectedRole = activeRoleButton?.textContent?.trim().toLowerCase()
-      await login(email.trim().toLowerCase(), password, selectedRole === 'student' || selectedRole === 'instructor' ? selectedRole : null)
-      return true
+      return await login(
+        email.trim().toLowerCase(),
+        password,
+        selectedRole === 'student' || selectedRole === 'instructor' ? selectedRole : null
+      )
     } catch (error) {
       window.alert(error?.message || 'Invalid email or password.')
       return false
