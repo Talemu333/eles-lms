@@ -116,8 +116,6 @@ app.get('/api/course', requireAuth, async (_req, res) => {
       const [manualRows] = await pool.query(`SELECT teaching_manual FROM levels WHERE id = ? LIMIT 1`, [level.id])
       manual = manualRows[0]?.teaching_manual || ''
     } catch (manualError) {
-      // Older databases may not contain teaching_manual. That must not prevent
-      // the rest of the course from loading.
       if (manualError.code !== 'ER_BAD_FIELD_ERROR') throw manualError
     }
 
@@ -270,6 +268,17 @@ app.post('/api/announcements', requireAuth, requireRole('instructor'), async (re
   }
 })
 
+app.delete('/api/announcements/:announcementId', requireAuth, requireRole('instructor'), async (req, res) => {
+  try {
+    const [result] = await pool.query('DELETE FROM announcements WHERE id = ?', [req.params.announcementId])
+    if (!result.affectedRows) return res.status(404).json({ message: 'Announcement not found.' })
+    res.json({ message: 'Announcement deleted.' })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'Unable to delete announcement.' })
+  }
+})
+
 app.post('/api/forum/topics', requireAuth, async (req, res) => {
   try {
     const { title, content = '' } = req.body
@@ -280,6 +289,27 @@ app.post('/api/forum/topics', requireAuth, async (req, res) => {
   } catch (error) {
     console.error(error)
     res.status(500).json({ message: 'Unable to post forum topic.' })
+  }
+})
+
+app.delete('/api/forum/topics/:topicId', requireAuth, requireRole('instructor'), async (req, res) => {
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    await connection.query('DELETE FROM forum_replies WHERE topic_id = ?', [req.params.topicId])
+    const [result] = await connection.query('DELETE FROM forum_topics WHERE id = ?', [req.params.topicId])
+    if (!result.affectedRows) {
+      await connection.rollback()
+      return res.status(404).json({ message: 'Forum topic not found.' })
+    }
+    await connection.commit()
+    res.json({ message: 'Forum topic deleted.' })
+  } catch (error) {
+    await connection.rollback()
+    console.error(error)
+    res.status(500).json({ message: 'Unable to delete forum topic.' })
+  } finally {
+    connection.release()
   }
 })
 
