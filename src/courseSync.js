@@ -1,9 +1,8 @@
 const KEY = 'els_lms_data_v11'
-const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/$/, '')
+const API_URL = (import.meta.env.VITE_API_URL || (import.meta.env.PROD ? 'https://eles-api.onrender.com' : 'http://localhost:5000')).replace(/\/$/, '')
 const TOKEN_KEY = 'eles_auth_token'
 
 let syncing = false
-let syncingFromServer = false
 let previousCourse = null
 let syncTimer = null
 let lastSyncedSignature = ''
@@ -24,7 +23,7 @@ async function request(path, options = {}) {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
       Authorization: `Bearer ${currentToken}`,
-      'Cache-Control': 'no-cache'
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
     }
   })
 
@@ -67,24 +66,20 @@ function normalizeCourse(course = {}) {
           messages: Array.isArray(topic.messages)
             ? topic.messages
             : [
-                ...(topic.content
-                  ? [{
-                      id: `opening-${topic.id}`,
-                      userId: topic.author_id,
-                      user: topic.author_name || '',
-                      text: topic.content,
-                      date: formatDate(topic.created_at)
-                    }]
-                  : []),
-                ...(Array.isArray(topic.replies)
-                  ? topic.replies.map(reply => ({
-                      id: reply.id,
-                      userId: reply.author_id,
-                      user: reply.author_name || '',
-                      text: reply.content || '',
-                      date: formatDate(reply.created_at)
-                    }))
-                  : [])
+                ...(topic.content ? [{
+                  id: `opening-${topic.id}`,
+                  userId: topic.author_id,
+                  user: topic.author_name || '',
+                  text: topic.content,
+                  date: formatDate(topic.created_at)
+                }] : []),
+                ...(Array.isArray(topic.replies) ? topic.replies.map(reply => ({
+                  id: reply.id,
+                  userId: reply.author_id,
+                  user: reply.author_name || '',
+                  text: reply.content || '',
+                  date: formatDate(reply.created_at)
+                })) : [])
               ]
         }))
       : []
@@ -97,21 +92,9 @@ async function fetchCourse() {
   return normalizeCourse(body?.course)
 }
 
-function writeCourse(course) {
-  const current = JSON.parse(localStorage.getItem(KEY) || '{}')
-  syncingFromServer = true
-  try {
-    localStorage.setItem(KEY, JSON.stringify({
-      ...current,
-      course: normalizeCourse(course)
-    }))
-  } finally {
-    syncingFromServer = false
-  }
-}
-
 async function syncCourse(nextCourse) {
-  if (!token() || syncing || syncingFromServer) return
+  if (!token() || syncing) return
+
   const next = normalizeCourse(nextCourse)
   const signature = JSON.stringify(next)
   if (signature === lastSyncedSignature) return
@@ -120,13 +103,11 @@ async function syncCourse(nextCourse) {
   syncing = true
 
   try {
-    if (!same(previous.title, next.title) || !same(previous.description, next.description)) {
-      if (next.title.trim()) {
-        await request('/api/course/level', {
-          method: 'PUT',
-          body: JSON.stringify({ title: next.title, description: next.description })
-        })
-      }
+    if ((!same(previous.title, next.title) || !same(previous.description, next.description)) && next.title.trim()) {
+      await request('/api/course/level', {
+        method: 'PUT',
+        body: JSON.stringify({ title: next.title, description: next.description })
+      })
     }
 
     if (!same(previous.manual, next.manual)) {
@@ -167,10 +148,7 @@ async function syncCourse(nextCourse) {
       if (!previousAnnouncementIds.has(String(announcement.id))) {
         await request('/api/announcements', {
           method: 'POST',
-          body: JSON.stringify({
-            title: announcement.title,
-            content: announcement.message || announcement.content || ''
-          })
+          body: JSON.stringify({ title: announcement.title, content: announcement.message || '' })
         })
       }
     }
@@ -181,10 +159,7 @@ async function syncCourse(nextCourse) {
         const messages = Array.isArray(topic.messages) ? topic.messages : []
         const created = await request('/api/forum/topics', {
           method: 'POST',
-          body: JSON.stringify({
-            title: topic.topic || topic.title || '',
-            content: messages[0]?.text || topic.content || ''
-          })
+          body: JSON.stringify({ title: topic.topic || '', content: messages[0]?.text || '' })
         })
         const serverTopicId = created?.id
         if (serverTopicId) {
@@ -201,14 +176,11 @@ async function syncCourse(nextCourse) {
         const oldTopic = previous.forums.find(item => String(item.id) === String(topic.id))
         const oldReplyIds = new Set((oldTopic?.messages || []).map(reply => String(reply.id)))
         for (const reply of topic.messages || []) {
-          if (!oldReplyIds.has(String(reply.id))) {
-            const topicId = String(topic.id).match(/^\d+$/) ? topic.id : null
-            if (topicId && reply.text?.trim()) {
-              await request(`/api/forum/topics/${topicId}/replies`, {
-                method: 'POST',
-                body: JSON.stringify({ content: reply.text })
-              })
-            }
+          if (!oldReplyIds.has(String(reply.id)) && String(topic.id).match(/^\d+$/) && reply.text?.trim()) {
+            await request(`/api/forum/topics/${topic.id}/replies`, {
+              method: 'POST',
+              body: JSON.stringify({ content: reply.text })
+            })
           }
         }
       }
@@ -216,15 +188,10 @@ async function syncCourse(nextCourse) {
 
     lastSyncedSignature = signature
     const refreshed = await fetchCourse()
-    if (refreshed) {
-      previousCourse = refreshed
-      writeCourse(refreshed)
-    } else {
-      previousCourse = next
-    }
+    if (refreshed) previousCourse = refreshed
+    else previousCourse = next
   } catch (error) {
     console.error('ELES course synchronization failed:', error)
-    previousCourse = previous
   } finally {
     syncing = false
   }
@@ -236,40 +203,50 @@ export async function bootstrapCourseSync() {
   let course = null
   let lastError = null
 
-  // Mobile networks can briefly fail the first request after authentication.
-  // Retry a few times before falling back to the existing browser cache.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       course = await fetchCourse()
       if (course) break
     } catch (error) {
       lastError = error
-      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 400 * attempt))
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 500 * attempt))
     }
+  }
+
+  if (!course && lastError) {
+    console.error('ELES server course load failed:', lastError)
+    throw lastError
   }
 
   if (course) {
     previousCourse = course
-    writeCourse(course)
     lastSyncedSignature = JSON.stringify(course)
-  } else if (lastError) {
-    console.warn('ELES course data could not be loaded from the server:', lastError.message)
   }
 
+  // localStorage is deliberately NOT used as a source of course data.
+  // App.jsx still calls localStorage.setItem() from its legacy state layer;
+  // intercept that write and send the course to the API instead of persisting
+  // another device-specific copy. The Aiven-backed API is the source of truth.
   if (!storagePatched) {
     storagePatched = true
     const originalSetItem = localStorage.setItem.bind(localStorage)
+    const originalRemoveItem = localStorage.removeItem.bind(localStorage)
+
+    originalRemoveItem(KEY)
+
     localStorage.setItem = (key, value) => {
-      originalSetItem(key, value)
-      if (key !== KEY || syncingFromServer || !token()) return
+      if (key !== KEY || !token()) {
+        originalSetItem(key, value)
+        return
+      }
 
       try {
         const parsed = JSON.parse(value)
         if (!parsed?.course) return
         clearTimeout(syncTimer)
-        syncTimer = setTimeout(() => syncCourse(parsed.course), 250)
-      } catch {
-        // Ignore unrelated/local malformed storage writes.
+        syncTimer = setTimeout(() => syncCourse(parsed.course), 200)
+      } catch (error) {
+        console.error('Invalid ELES course state:', error)
       }
     }
   }
