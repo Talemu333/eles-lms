@@ -11,7 +11,10 @@ const poolConfig = {
   port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'eles_lms',
+  // Aiven's ELES database is defaultdb. The environment variable still wins
+  // in local/development/other deployments, so this only protects production
+  // when DB_NAME was accidentally omitted.
+  database: process.env.DB_NAME || 'defaultdb',
   waitForConnections: true,
   connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
   queueLimit: 0
