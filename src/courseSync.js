@@ -6,6 +6,7 @@ let syncing = false
 let syncingFromServer = false
 let previousCourse = null
 let syncTimer = null
+let lastSyncedSignature = ''
 
 function token() {
   return sessionStorage.getItem(TOKEN_KEY)
@@ -109,6 +110,9 @@ function writeCourse(course) {
 async function syncCourse(nextCourse) {
   if (!token() || syncing || syncingFromServer) return
   const next = normalizeCourse(nextCourse)
+  const signature = JSON.stringify(next)
+  if (signature === lastSyncedSignature) return
+
   const previous = previousCourse || normalizeCourse({})
   syncing = true
 
@@ -207,6 +211,7 @@ async function syncCourse(nextCourse) {
       }
     }
 
+    lastSyncedSignature = signature
     const refreshed = await fetchCourse()
     if (refreshed) {
       previousCourse = refreshed
@@ -230,6 +235,7 @@ export async function bootstrapCourseSync() {
     if (course) {
       previousCourse = course
       writeCourse(course)
+      lastSyncedSignature = JSON.stringify(course)
     }
   } catch (error) {
     console.warn('ELES course data could not be loaded from the server:', error.message)
