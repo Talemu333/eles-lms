@@ -28,10 +28,10 @@ async function request(path, options = {}) {
   return body
 }
 
-export async function login(email, password, role) {
+export async function login(email, password) {
   const body = await request('/api/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email, password, role })
+    body: JSON.stringify({ email, password })
   })
   saveToken(body.token)
   return body.user
@@ -53,18 +53,13 @@ export async function getCurrentUser() {
 
 if (typeof window !== 'undefined') {
   window.__elesLogin = async (email, password) => {
-    const normalizedEmail = email.trim().toLowerCase()
-    let lastError
-    for (const role of ['student', 'instructor']) {
-      try {
-        await login(normalizedEmail, password, role)
-        window.location.reload()
-        return true
-      } catch (error) {
-        lastError = error
-      }
+    try {
+      await login(email.trim().toLowerCase(), password)
+      window.location.reload()
+      return true
+    } catch (error) {
+      window.alert(error?.message || 'Invalid email or password.')
+      return false
     }
-    window.alert(lastError?.message || 'Invalid email, password or account type.')
-    return false
   }
 }
