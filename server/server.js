@@ -65,12 +65,10 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body
     const normalizedEmail = String(email || '').trim().toLowerCase()
-
     const [rows] = await pool.query(
       'SELECT id, name, email, password_hash, role FROM users WHERE email = ? LIMIT 1',
       [normalizedEmail]
     )
-
     if (!rows.length || !(await bcrypt.compare(String(password || ''), rows[0].password_hash))) {
       return res.status(401).json({ message: 'Invalid email or password.' })
     }
@@ -180,27 +178,25 @@ app.put('/api/course/manual', requireAuth, requireRole('instructor'), async (req
 
 app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req, res) => {
   try {
-    const { unit_number, unit_code, title, status, description = '' } = req.body
-    if (!unit_number || !unit_code || !String(title || '').trim() || !['Mandatory', 'Optional'].includes(status)) {
-      return res.status(400).json({ message: 'Unit number, code, title and status are required.' })
+    const { unitId, title, status, description = '', reference } = req.body
+    const unitNumber = Number(unitId)
+    if (!Number.isInteger(unitNumber) || unitNumber < 1 || unitNumber > 20 || !String(title || '').trim()) {
+      return res.status(400).json({ message: 'Valid unit number and title are required.' })
     }
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!level) return res.status(400).json({ message: 'Create a level before adding units.' })
-    const [existing] = await pool.query('SELECT id, instructor_id FROM units WHERE level_id = ? AND unit_number = ? LIMIT 1', [level.id, unit_number])
-    if (existing.length && existing[0].instructor_id && existing[0].instructor_id !== req.user.id) {
+
+    const code = String(reference || '').trim() || `UNIT-${String(unitNumber).padStart(2, '0')}`
+    const [existing] = await pool.query('SELECT id, instructor_id FROM units WHERE level_id = ? AND unit_number = ? LIMIT 1', [level.id, unitNumber])
+    if (existing.length && existing[0].instructor_id && Number(existing[0].instructor_id) !== Number(req.user.id)) {
       return res.status(409).json({ message: 'This unit is already assigned to another instructor.' })
     }
+
     if (existing.length) {
-      await pool.query(
-        'UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?',
-        [unit_code, String(title).trim(), status, String(description).trim(), req.user.id, existing[0].id]
-      )
+      await pool.query('UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?', [code, String(title).trim(), status, String(description).trim(), req.user.id, existing[0].id])
       return res.json({ message: 'Unit saved.' })
     }
-    await pool.query(
-      'INSERT INTO units (level_id, unit_number, unit_code, title, status, description, instructor_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [level.id, unit_number, unit_code, String(title).trim(), status, String(description).trim(), req.user.id]
-    )
+    await pool.query('INSERT INTO units (level_id, unit_number, unit_code, title, status, description, instructor_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [level.id, unitNumber, code, String(title).trim(), status, String(description).trim(), req.user.id])
     res.status(201).json({ message: 'Unit saved.' })
   } catch (error) {
     console.error(error)
@@ -210,70 +206,62 @@ app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req
 
 app.put('/api/course/assessments', requireAuth, requireRole('instructor'), async (req, res) => {
   try {
-    const { type } = req.body
+    const types = Array.isArray(req.body.types) ? req.body.types : []
     const valid = ['Direct Observation', 'Question and Answer', 'Personal Statement', 'Work Practice']
-    if (!valid.includes(type)) return res.status(400).json({ message: 'Invalid assessment method.' })
+    if (types.some(type => !valid.includes(type))) return res.status(400).json({ message: 'Invalid assessment method.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    if (!level) return res.status(400).json({ message: 'Create a level before adding assessments.' })
-    await pool.query('INSERT IGNORE INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
-    res.json({ message: 'Assessment method saved.' })
+    if (!level) return res.status(400).json({ message: 'Create a level before selecting assessment methods.' })
+    await pool.query('DELETE FROM assessments WHERE level_id = ?', [level.id])
+    for (const type of [...new Set(types)]) await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
+    res.json({ message: 'Assessment methods saved.' })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'Unable to save assessment method.' })
+    res.status(500).json({ message: 'Unable to save assessment methods.' })
   }
 })
 
-app.post('/api/course/announcements', requireAuth, requireRole('instructor'), async (req, res) => {
+app.post('/api/announcements', requireAuth, requireRole('instructor'), async (req, res) => {
   try {
     const { title, content } = req.body
-    if (!String(title || '').trim() || !String(content || '').trim()) return res.status(400).json({ message: 'Enter an announcement title and message.' })
+    if (!String(title || '').trim() || !String(content || '').trim()) return res.status(400).json({ message: 'Title and content are required.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    const [result] = await pool.query(
-      'INSERT INTO announcements (level_id, title, content, author_id) VALUES (?, ?, ?, ?)',
-      [level?.id || null, String(title).trim(), String(content).trim(), req.user.id]
-    )
-    res.status(201).json({ id: result.insertId, message: 'Announcement published.' })
+    const [result] = await pool.query('INSERT INTO announcements (level_id, title, content, author_id) VALUES (?, ?, ?, ?)', [level?.id || null, String(title).trim(), String(content).trim(), req.user.id])
+    res.status(201).json({ id: result.insertId, message: 'Announcement created.' })
   } catch (error) {
     console.error(error)
     res.status(500).json({ message: 'Unable to create announcement.' })
   }
 })
 
-app.post('/api/course/forums', requireAuth, async (req, res) => {
+app.post('/api/forum/topics', requireAuth, async (req, res) => {
   try {
-    const { title, content = '' } = req.body
-    if (!String(title || '').trim()) return res.status(400).json({ message: 'Enter a topic title.' })
-    if (req.user.role !== 'instructor' && !String(content || '').trim()) return res.status(400).json({ message: 'Write a response.' })
+    const { title, content } = req.body
+    if (!String(title || '').trim() || !String(content || '').trim()) return res.status(400).json({ message: 'Title and content are required.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    const [result] = await pool.query(
-      'INSERT INTO forum_topics (level_id, title, content, author_id) VALUES (?, ?, ?, ?)',
-      [level?.id || null, String(title).trim(), String(content).trim(), req.user.id]
-    )
-    res.status(201).json({ id: result.insertId, message: 'Forum topic created.' })
+    const [result] = await pool.query('INSERT INTO forum_topics (level_id, title, content, author_id) VALUES (?, ?, ?, ?)', [level?.id || null, String(title).trim(), String(content).trim(), req.user.id])
+    res.status(201).json({ id: result.insertId, message: 'Topic created.' })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'Unable to create forum topic.' })
+    res.status(500).json({ message: 'Unable to create topic.' })
   }
 })
 
-app.post('/api/course/forums/:topicId/replies', requireAuth, async (req, res) => {
+app.post('/api/forum/topics/:topicId/replies', requireAuth, async (req, res) => {
   try {
     const { content } = req.body
-    if (!String(content || '').trim()) return res.status(400).json({ message: 'Write a response.' })
-    const [result] = await pool.query(
-      'INSERT INTO forum_replies (topic_id, content, author_id) VALUES (?, ?, ?)',
-      [req.params.topicId, String(content).trim(), req.user.id]
-    )
-    res.status(201).json({ id: result.insertId, message: 'Response sent.' })
+    if (!String(content || '').trim()) return res.status(400).json({ message: 'Reply content is required.' })
+    const [topic] = await pool.query('SELECT id FROM forum_topics WHERE id = ? LIMIT 1', [req.params.topicId])
+    if (!topic.length) return res.status(404).json({ message: 'Forum topic not found.' })
+    const [result] = await pool.query('INSERT INTO forum_replies (topic_id, content, author_id) VALUES (?, ?, ?)', [req.params.topicId, String(content).trim(), req.user.id])
+    res.status(201).json({ id: result.insertId, message: 'Reply added.' })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'Unable to send response.' })
+    res.status(500).json({ message: 'Unable to add reply.' })
   }
 })
 
 app.use((error, _req, res, _next) => {
   console.error(error)
-  if (error?.message === 'Origin not allowed by CORS') return res.status(403).json({ message: error.message })
   res.status(500).json({ message: 'Server error.' })
 })
 
