@@ -120,12 +120,16 @@ app.get('/api/course', requireAuth, async (_req, res) => {
     const [[level]] = await pool.query('SELECT id, title, description, teaching_manual AS manual FROM levels ORDER BY id LIMIT 1')
     if (!level) return res.json({ course: { title: '', description: '', manual: '', units: [], assessments: [], announcements: [], forums: [] } })
 
+    // Return the complete level curriculum, not only units already assigned to
+    // an instructor. Every authenticated device should receive the same course
+    // state from the server, while instructor ownership remains enforced when
+    // a unit is saved through POST /api/course/units.
     const [units] = await pool.query(`
       SELECT u.id, u.unit_number, u.unit_code, u.title, u.status, u.description,
              u.instructor_id, instructor.name AS instructor_name
       FROM units u
       LEFT JOIN users instructor ON instructor.id = u.instructor_id
-      WHERE u.level_id = ? AND u.instructor_id IS NOT NULL
+      WHERE u.level_id = ?
       ORDER BY u.unit_number
     `, [level.id])
     const [assessments] = await pool.query('SELECT id, type FROM assessments WHERE level_id = ? ORDER BY id', [level.id])
