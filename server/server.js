@@ -102,7 +102,8 @@ app.get('/api/course', requireAuth, async (_req, res) => {
              u.instructor_id, instructor.name AS instructor_name
       FROM units u
       LEFT JOIN users instructor ON instructor.id = u.instructor_id
-      WHERE u.level_id = ? ORDER BY u.unit_number
+      WHERE u.level_id = ? AND u.instructor_id IS NOT NULL
+      ORDER BY u.unit_number
     `, [level.id])
     const [assessments] = await pool.query('SELECT id, type FROM assessments WHERE level_id = ? ORDER BY id', [level.id])
     const [announcements] = await pool.query(`
