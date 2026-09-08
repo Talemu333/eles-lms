@@ -9,9 +9,7 @@ const app = express()
 const port = Number(process.env.PORT || 5000)
 
 const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
-  .split(',')
-  .map(value => value.trim())
-  .filter(Boolean)
+  .split(',').map(value => value.trim()).filter(Boolean)
 
 app.use(cors({
   origin(origin, callback) {
@@ -38,19 +36,13 @@ app.get('/api/health', async (_req, res) => {
     const [[level]] = await pool.query('SELECT id, title, description FROM levels ORDER BY id LIMIT 1')
     const [assessmentRows] = await pool.query('SELECT id, type FROM assessments ORDER BY id')
     res.json({
-      status: 'ok',
-      database: 'connected',
-      databaseName: process.env.DB_NAME || 'defaultdb',
-      course: {
-        levelId: level?.id ?? null,
-        title: level?.title || '',
-        description: level?.description || ''
-      },
+      status: 'ok', database: 'connected', databaseName: process.env.DB_NAME || 'defaultdb',
+      course: { levelId: level?.id ?? null, title: level?.title || '', description: level?.description || '' },
       counts: Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, Number(value)])),
       assessmentTypes: assessmentRows.map(item => item.type)
     })
   } catch (error) {
-    console.error(error)
+    console.error('[health]', error)
     res.status(503).json({ status: 'error', database: 'unavailable' })
   }
 })
@@ -59,49 +51,26 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, role } = req.body
     const normalizedEmail = String(email || '').trim().toLowerCase()
-
-    if (!String(name || '').trim() || !normalizedEmail || !password || !['student', 'instructor'].includes(role)) {
-      return res.status(400).json({ message: 'Name, email, password and account type are required.' })
-    }
-    if (String(password).length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters.' })
-    }
-
+    if (!String(name || '').trim() || !normalizedEmail || !password || !['student', 'instructor'].includes(role)) return res.status(400).json({ message: 'Name, email, password and account type are required.' })
+    if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' })
     const [existing] = await pool.query('SELECT id FROM users WHERE email = ?', [normalizedEmail])
     if (existing.length) return res.status(409).json({ message: 'An account with this email already exists.' })
-
     const passwordHash = await bcrypt.hash(String(password), 12)
-    const [result] = await pool.query(
-      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-      [String(name).trim(), normalizedEmail, passwordHash, role]
-    )
-
+    const [result] = await pool.query('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)', [String(name).trim(), normalizedEmail, passwordHash, role])
     const user = { id: result.insertId, name: String(name).trim(), email: normalizedEmail, role }
     res.status(201).json({ user, token: signToken(user) })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to create account.' })
-  }
+  } catch (error) { console.error('[register]', error); res.status(500).json({ message: 'Unable to create account.' }) }
 })
 
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body
     const normalizedEmail = String(email || '').trim().toLowerCase()
-    const [rows] = await pool.query(
-      'SELECT id, name, email, password_hash, role FROM users WHERE email = ? LIMIT 1',
-      [normalizedEmail]
-    )
-    if (!rows.length || !(await bcrypt.compare(String(password || ''), rows[0].password_hash))) {
-      return res.status(401).json({ message: 'Invalid email or password.' })
-    }
-
+    const [rows] = await pool.query('SELECT id, name, email, password_hash, role FROM users WHERE email = ? LIMIT 1', [normalizedEmail])
+    if (!rows.length || !(await bcrypt.compare(String(password || ''), rows[0].password_hash))) return res.status(401).json({ message: 'Invalid email or password.' })
     const user = { id: rows[0].id, name: rows[0].name, email: rows[0].email, role: rows[0].role }
     res.json({ user, token: signToken(user) })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to log in.' })
-  }
+  } catch (error) { console.error('[login]', error); res.status(500).json({ message: 'Unable to log in.' }) }
 })
 
 app.get('/api/auth/me', requireAuth, async (req, res) => {
@@ -109,28 +78,29 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
     const [rows] = await pool.query('SELECT id, name, email, role FROM users WHERE id = ? LIMIT 1', [req.user.id])
     if (!rows.length) return res.status(404).json({ message: 'User account not found.' })
     res.json({ user: rows[0] })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to load account.' })
-  }
+  } catch (error) { console.error('[auth/me]', error); res.status(500).json({ message: 'Unable to load account.' }) }
 })
 
-app.get('/api/course', requireAuth, async (_req, res) => {
+app.get('/api/course', requireAuth, async (req, res) => {
   try {
-    const [[level]] = await pool.query('SELECT id, title, description, teaching_manual AS manual FROM levels ORDER BY id LIMIT 1')
+    // Do not make course loading depend on an ALTER TABLE having succeeded.
+    // Older Aiven databases may not have teaching_manual yet. Detect it and
+    // use an empty value until the instructor saves one.
+    const [manualColumn] = await pool.query(`
+      SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'levels'
+        AND COLUMN_NAME = 'teaching_manual' LIMIT 1
+    `)
+    const manualExpression = manualColumn.length ? 'teaching_manual' : "''"
+    const [[level]] = await pool.query(`SELECT id, title, description, ${manualExpression} AS manual FROM levels ORDER BY id LIMIT 1`)
+
     if (!level) return res.json({ course: { title: '', description: '', manual: '', units: [], assessments: [], announcements: [], forums: [] } })
 
-    // Return the complete level curriculum, not only units already assigned to
-    // an instructor. Every authenticated device should receive the same course
-    // state from the server, while instructor ownership remains enforced when
-    // a unit is saved through POST /api/course/units.
     const [units] = await pool.query(`
       SELECT u.id, u.unit_number, u.unit_code, u.title, u.status, u.description,
              u.instructor_id, instructor.name AS instructor_name
-      FROM units u
-      LEFT JOIN users instructor ON instructor.id = u.instructor_id
-      WHERE u.level_id = ?
-      ORDER BY u.unit_number
+      FROM units u LEFT JOIN users instructor ON instructor.id = u.instructor_id
+      WHERE u.level_id = ? ORDER BY u.unit_number
     `, [level.id])
     const [assessments] = await pool.query('SELECT id, type FROM assessments WHERE level_id = ? ORDER BY id', [level.id])
     const [announcements] = await pool.query(`
@@ -154,24 +124,15 @@ app.get('/api/course', requireAuth, async (_req, res) => {
       forums.push({ ...topic, replies })
     }
 
-    res.json({
-      course: {
-        title: level.title,
-        description: level.description || '',
-        manual: level.manual || '',
-        units: units.map(u => ({
-          id: u.id, unitId: String(u.unit_number).padStart(2, '0'), number: `Unit ${String(u.unit_number).padStart(2, '0')}`,
-          reference: u.unit_code, title: u.title, status: u.status, description: u.description || '',
-          instructorId: u.instructor_id, instructorName: u.instructor_name || ''
-        })),
-        assessments,
-        announcements,
-        forums
-      }
-    })
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+    res.json({ course: {
+      title: level.title, description: level.description || '', manual: level.manual || '',
+      units: units.map(u => ({ id: u.id, unitId: String(u.unit_number).padStart(2, '0'), number: `Unit ${String(u.unit_number).padStart(2, '0')}`, reference: u.unit_code, title: u.title, status: u.status, description: u.description || '', instructorId: u.instructor_id, instructorName: u.instructor_name || '' })),
+      assessments, announcements, forums
+    } })
   } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to load course data.' })
+    console.error('[course] Failed for user', req.user?.id, error)
+    res.status(500).json({ message: 'Unable to load course data.', code: error.code || 'COURSE_LOAD_FAILED' })
   }
 })
 
@@ -180,16 +141,10 @@ app.put('/api/course/level', requireAuth, requireRole('instructor'), async (req,
   if (!String(title || '').trim()) return res.status(400).json({ message: 'Enter a level title.' })
   try {
     const [[existing]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    if (existing) {
-      await pool.query('UPDATE levels SET title = ?, description = ? WHERE id = ?', [String(title).trim(), String(description).trim(), existing.id])
-      return res.json({ message: 'Level saved.' })
-    }
-    await pool.query('INSERT INTO levels (title, description) VALUES (?, ?)', [String(title).trim(), String(description).trim()])
-    res.status(201).json({ message: 'Level saved.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to save level.' })
-  }
+    if (existing) await pool.query('UPDATE levels SET title = ?, description = ? WHERE id = ?', [String(title).trim(), String(description).trim(), existing.id])
+    else await pool.query('INSERT INTO levels (title, description) VALUES (?, ?)', [String(title).trim(), String(description).trim()])
+    res.json({ message: 'Level saved.' })
+  } catch (error) { console.error('[course/level]', error); res.status(500).json({ message: 'Unable to save level.' }) }
 })
 
 app.put('/api/course/manual', requireAuth, requireRole('instructor'), async (req, res) => {
@@ -197,12 +152,11 @@ app.put('/api/course/manual', requireAuth, requireRole('instructor'), async (req
     const { manual = '' } = req.body
     const [[existing]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!existing) return res.status(400).json({ message: 'Set a level first.' })
+    const [columns] = await pool.query(`SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='levels' AND COLUMN_NAME='teaching_manual' LIMIT 1`)
+    if (!columns.length) return res.status(409).json({ message: 'Teaching manual storage is not available in the current database schema.' })
     await pool.query('UPDATE levels SET teaching_manual = ? WHERE id = ?', [String(manual), existing.id])
     res.json({ message: 'Teaching manual saved.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to save teaching manual.' })
-  }
+  } catch (error) { console.error('[course/manual]', error); res.status(500).json({ message: 'Unable to save teaching manual.' }) }
 })
 
 app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req, res) => {
@@ -212,25 +166,11 @@ app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!level) return res.status(400).json({ message: 'Set a level first.' })
     const [[existing]] = await pool.query('SELECT id, instructor_id FROM units WHERE level_id = ? AND unit_number = ? LIMIT 1', [level.id, Number(unitId)])
-    if (existing && existing.instructor_id && Number(existing.instructor_id) !== Number(req.user.id)) {
-      return res.status(409).json({ message: 'This unit is already assigned to another instructor.' })
-    }
-    if (existing) {
-      await pool.query(
-        'UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?',
-        [String(reference), String(title).trim(), String(status), String(description), req.user.id, existing.id]
-      )
-      return res.json({ message: 'Unit saved.' })
-    }
-    await pool.query(
-      'INSERT INTO units (level_id, unit_number, unit_code, title, status, description, instructor_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [level.id, Number(unitId), String(reference), String(title).trim(), String(status), String(description), req.user.id]
-    )
-    res.status(201).json({ message: 'Unit saved.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to save unit.' })
-  }
+    if (existing && existing.instructor_id && Number(existing.instructor_id) !== Number(req.user.id)) return res.status(409).json({ message: 'This unit is already assigned to another instructor.' })
+    if (existing) await pool.query('UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?', [String(reference), String(title).trim(), String(status), String(description), req.user.id, existing.id])
+    else await pool.query('INSERT INTO units (level_id, unit_number, unit_code, title, status, description, instructor_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [level.id, Number(unitId), String(reference), String(title).trim(), String(status), String(description), req.user.id])
+    res.json({ message: 'Unit saved.' })
+  } catch (error) { console.error('[course/units]', error); res.status(500).json({ message: 'Unable to save unit.' }) }
 })
 
 app.put('/api/course/assessments', requireAuth, requireRole('instructor'), async (req, res) => {
@@ -239,14 +179,9 @@ app.put('/api/course/assessments', requireAuth, requireRole('instructor'), async
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!level) return res.status(400).json({ message: 'Set a level first.' })
     await pool.query('DELETE FROM assessments WHERE level_id = ?', [level.id])
-    for (const type of [...new Set(types.map(value => String(value).trim()).filter(Boolean))]) {
-      await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
-    }
+    for (const type of [...new Set(types.map(value => String(value).trim()).filter(Boolean))]) await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
     res.json({ message: 'Assessment methods saved.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to save assessment methods.' })
-  }
+  } catch (error) { console.error('[course/assessments]', error); res.status(500).json({ message: 'Unable to save assessment methods.' }) }
 })
 
 app.post('/api/announcements', requireAuth, requireRole('instructor'), async (req, res) => {
@@ -254,46 +189,33 @@ app.post('/api/announcements', requireAuth, requireRole('instructor'), async (re
     const { title, content = '' } = req.body
     if (!String(title || '').trim()) return res.status(400).json({ message: 'Announcement title is required.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    const [result] = await pool.query(
-      'INSERT INTO announcements (level_id, author_id, title, content) VALUES (?, ?, ?, ?)',
-      [level?.id || null, req.user.id, String(title).trim(), String(content)]
-    )
+    const [result] = await pool.query('INSERT INTO announcements (level_id, author_id, title, content) VALUES (?, ?, ?, ?)', [level?.id || null, req.user.id, String(title).trim(), String(content)])
     res.status(201).json({ id: result.insertId, message: 'Announcement posted.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to post announcement.' })
-  }
+  } catch (error) { console.error('[announcements]', error); res.status(500).json({ message: 'Unable to post announcement.' }) }
 })
 
 app.post('/api/forum/topics', requireAuth, async (req, res) => {
   try {
     const { title, content = '' } = req.body
-    if (!String(title || '').trim()) return res.status(400).json({ message: 'Topic title is required.' })
+    if (!String(title || '').trim()) return res.status(400).json({ message: 'Forum topic title is required.' })
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
-    const [result] = await pool.query(
-      'INSERT INTO forum_topics (level_id, author_id, title, content) VALUES (?, ?, ?, ?)',
-      [level?.id || null, req.user.id, String(title).trim(), String(content)]
-    )
-    res.status(201).json({ id: result.insertId, message: 'Forum topic posted.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to post forum topic.' })
-  }
+    const [result] = await pool.query('INSERT INTO forum_topics (level_id, author_id, title, content) VALUES (?, ?, ?, ?)', [level?.id || null, req.user.id, String(title).trim(), String(content)])
+    res.status(201).json({ id: result.insertId, message: 'Forum topic created.' })
+  } catch (error) { console.error('[forum/topics]', error); res.status(500).json({ message: 'Unable to create forum topic.' }) }
 })
 
 app.post('/api/forum/topics/:topicId/replies', requireAuth, async (req, res) => {
   try {
     const { content = '' } = req.body
     if (!String(content).trim()) return res.status(400).json({ message: 'Reply content is required.' })
-    const [result] = await pool.query(
-      'INSERT INTO forum_replies (topic_id, author_id, content) VALUES (?, ?, ?)',
-      [req.params.topicId, req.user.id, String(content)]
-    )
+    const [result] = await pool.query('INSERT INTO forum_replies (topic_id, author_id, content) VALUES (?, ?, ?)', [Number(req.params.topicId), req.user.id, String(content)])
     res.status(201).json({ id: result.insertId, message: 'Reply posted.' })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'Unable to post reply.' })
-  }
+  } catch (error) { console.error('[forum/replies]', error); res.status(500).json({ message: 'Unable to post reply.' }) }
 })
 
-app.listen(port, () => console.log(`ELES API listening on ${port}`))
+app.use((error, _req, res, _next) => {
+  console.error('[server]', error)
+  res.status(500).json({ message: error.message || 'Server error.' })
+})
+
+app.listen(port, () => console.log(`ELES API running on port ${port}`))
