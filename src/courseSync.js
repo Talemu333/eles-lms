@@ -1,12 +1,9 @@
-const KEY = 'els_lms_data_v11'
 const API_URL = (import.meta.env.VITE_API_URL || (import.meta.env.PROD ? 'https://eles-api.onrender.com' : 'http://localhost:5000')).replace(/\/$/, '')
 const TOKEN_KEY = 'eles_auth_token'
 
 let syncing = false
 let previousCourse = null
-let syncTimer = null
 let lastSyncedSignature = ''
-let storagePatched = false
 
 function token() {
   return sessionStorage.getItem(TOKEN_KEY)
@@ -14,7 +11,7 @@ function token() {
 
 async function request(path, options = {}) {
   const currentToken = token()
-  if (!currentToken) return null
+  if (!currentToken) throw new Error('Your session has expired. Please log in again.')
 
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -28,7 +25,12 @@ async function request(path, options = {}) {
   })
 
   const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(body.message || 'Unable to synchronize course data.')
+  if (!response.ok) {
+    const error = new Error(body.message || 'Unable to synchronize course data.')
+    error.status = response.status
+    error.code = body.code
+    throw error
+  }
   return body
 }
 
@@ -87,12 +89,13 @@ function normalizeCourse(course = {}) {
 }
 
 async function fetchCourse() {
-  if (!token()) return null
   const body = await request(`/api/course?_=${Date.now()}`)
   return normalizeCourse(body?.course)
 }
 
-async function syncCourse(nextCourse) {
+// This function is ONLY for explicit instructor changes. It is never called
+// automatically from browser storage. The database remains the source of truth.
+export async function syncCourse(nextCourse) {
   if (!token() || syncing) return
 
   const next = normalizeCourse(nextCourse)
@@ -186,20 +189,16 @@ async function syncCourse(nextCourse) {
       }
     }
 
-    lastSyncedSignature = signature
     const refreshed = await fetchCourse()
-    if (refreshed) previousCourse = refreshed
-    else previousCourse = next
-  } catch (error) {
-    console.error('ELES course synchronization failed:', error)
+    previousCourse = refreshed || next
+    lastSyncedSignature = JSON.stringify(previousCourse)
+    return previousCourse
   } finally {
     syncing = false
   }
 }
 
 export async function bootstrapCourseSync() {
-  if (!token()) return null
-
   let course = null
   let lastError = null
 
@@ -221,34 +220,6 @@ export async function bootstrapCourseSync() {
   if (course) {
     previousCourse = course
     lastSyncedSignature = JSON.stringify(course)
-  }
-
-  // localStorage is deliberately NOT used as a source of course data.
-  // App.jsx still calls localStorage.setItem() from its legacy state layer;
-  // intercept that write and send the course to the API instead of persisting
-  // another device-specific copy. The Aiven-backed API is the source of truth.
-  if (!storagePatched) {
-    storagePatched = true
-    const originalSetItem = localStorage.setItem.bind(localStorage)
-    const originalRemoveItem = localStorage.removeItem.bind(localStorage)
-
-    originalRemoveItem(KEY)
-
-    localStorage.setItem = (key, value) => {
-      if (key !== KEY || !token()) {
-        originalSetItem(key, value)
-        return
-      }
-
-      try {
-        const parsed = JSON.parse(value)
-        if (!parsed?.course) return
-        clearTimeout(syncTimer)
-        syncTimer = setTimeout(() => syncCourse(parsed.course), 200)
-      } catch (error) {
-        console.error('Invalid ELES course state:', error)
-      }
-    }
   }
 
   return course
