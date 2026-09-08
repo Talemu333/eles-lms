@@ -1,3 +1,5 @@
+import { bootstrapCourseSync } from './courseSync.js'
+
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/$/, '')
 const TOKEN_KEY = 'eles_auth_token'
 
@@ -44,6 +46,12 @@ export async function login(email, password, expectedRole = null) {
   }
 
   saveToken(body.token)
+
+  // The application may be authenticating for the first time on a new device.
+  // Hydrate the shared course data immediately after the token exists so the
+  // dashboard does not depend on pre-existing browser localStorage.
+  await bootstrapCourseSync()
+
   return body.user
 }
 
@@ -53,6 +61,7 @@ export async function register(name, email, password, role) {
     body: JSON.stringify({ name, email, password, role })
   })
   saveToken(body.token)
+  await bootstrapCourseSync()
   return body.user
 }
 
