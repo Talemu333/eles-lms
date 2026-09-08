@@ -59,23 +59,14 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, role } = req.body
     const normalizedEmail = String(email || '').trim().toLowerCase()
-
     if (!String(name || '').trim() || !normalizedEmail || !password || !['student', 'instructor'].includes(role)) {
       return res.status(400).json({ message: 'Name, email, password and account type are required.' })
     }
-    if (String(password).length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters.' })
-    }
-
+    if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' })
     const [existing] = await pool.query('SELECT id FROM users WHERE email = ?', [normalizedEmail])
     if (existing.length) return res.status(409).json({ message: 'An account with this email already exists.' })
-
     const passwordHash = await bcrypt.hash(String(password), 12)
-    const [result] = await pool.query(
-      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-      [String(name).trim(), normalizedEmail, passwordHash, role]
-    )
-
+    const [result] = await pool.query('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)', [String(name).trim(), normalizedEmail, passwordHash, role])
     const user = { id: result.insertId, name: String(name).trim(), email: normalizedEmail, role }
     res.status(201).json({ user, token: signToken(user) })
   } catch (error) {
@@ -88,14 +79,8 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body
     const normalizedEmail = String(email || '').trim().toLowerCase()
-    const [rows] = await pool.query(
-      'SELECT id, name, email, password_hash, role FROM users WHERE email = ? LIMIT 1',
-      [normalizedEmail]
-    )
-    if (!rows.length || !(await bcrypt.compare(String(password || ''), rows[0].password_hash))) {
-      return res.status(401).json({ message: 'Invalid email or password.' })
-    }
-
+    const [rows] = await pool.query('SELECT id, name, email, password_hash, role FROM users WHERE email = ? LIMIT 1', [normalizedEmail])
+    if (!rows.length || !(await bcrypt.compare(String(password || ''), rows[0].password_hash))) return res.status(401).json({ message: 'Invalid email or password.' })
     const user = { id: rows[0].id, name: rows[0].name, email: rows[0].email, role: rows[0].role }
     res.json({ user, token: signToken(user) })
   } catch (error) {
@@ -115,16 +100,26 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   }
 })
 
+// Course data is always read from the server/database. Do not use browser
+// storage as a source of truth. Keep this query compatible with the existing
+// Aiven schema: teaching_manual is optional and is therefore loaded separately.
 app.get('/api/course', requireAuth, async (_req, res) => {
   try {
-    const [manualColumn] = await pool.query(`
-      SELECT 1 FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'levels'
-        AND COLUMN_NAME = 'teaching_manual' LIMIT 1
-    `)
-    const manualExpression = manualColumn.length ? 'teaching_manual' : "''"
-    const [[level]] = await pool.query(`SELECT id, title, description, ${manualExpression} AS manual FROM levels ORDER BY id LIMIT 1`)
-    if (!level) return res.json({ course: { title: '', description: '', manual: '', units: [], assessments: [], announcements: [], forums: [] } })
+    const [[level]] = await pool.query('SELECT id, title, description FROM levels ORDER BY id LIMIT 1')
+    if (!level) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+      return res.json({ course: { title: '', description: '', manual: '', units: [], assessments: [], announcements: [], forums: [] } })
+    }
+
+    let manual = ''
+    try {
+      const [manualRows] = await pool.query(`SELECT teaching_manual FROM levels WHERE id = ? LIMIT 1`, [level.id])
+      manual = manualRows[0]?.teaching_manual || ''
+    } catch (manualError) {
+      // Older databases may not contain teaching_manual. That must not prevent
+      // the rest of the course from loading.
+      if (manualError.code !== 'ER_BAD_FIELD_ERROR') throw manualError
+    }
 
     const [units] = await pool.query(`
       SELECT u.id, u.unit_number, u.unit_code, u.title, u.status, u.description,
@@ -134,38 +129,53 @@ app.get('/api/course', requireAuth, async (_req, res) => {
       WHERE u.level_id = ?
       ORDER BY u.unit_number
     `, [level.id])
+
     const [assessments] = await pool.query('SELECT id, type FROM assessments WHERE level_id = ? ORDER BY id', [level.id])
+
     const [announcements] = await pool.query(`
       SELECT a.id, a.title, a.content, a.author_id, u.name AS author_name, a.created_at, a.updated_at
-      FROM announcements a JOIN users u ON u.id = a.author_id
-      WHERE a.level_id = ? OR a.level_id IS NULL ORDER BY a.created_at DESC
+      FROM announcements a
+      JOIN users u ON u.id = a.author_id
+      WHERE a.level_id = ? OR a.level_id IS NULL
+      ORDER BY a.created_at DESC
     `, [level.id])
+
     const [topics] = await pool.query(`
       SELECT t.id, t.title, t.content, t.author_id, u.name AS author_name, t.created_at, t.updated_at
-      FROM forum_topics t JOIN users u ON u.id = t.author_id
-      WHERE t.level_id = ? OR t.level_id IS NULL ORDER BY t.created_at DESC
+      FROM forum_topics t
+      JOIN users u ON u.id = t.author_id
+      WHERE t.level_id = ? OR t.level_id IS NULL
+      ORDER BY t.created_at DESC
     `, [level.id])
 
     const forums = []
     for (const topic of topics) {
       const [replies] = await pool.query(`
         SELECT r.id, r.content, r.author_id, u.name AS author_name, r.created_at, r.updated_at
-        FROM forum_replies r JOIN users u ON u.id = r.author_id
-        WHERE r.topic_id = ? ORDER BY r.created_at ASC
+        FROM forum_replies r
+        JOIN users u ON u.id = r.author_id
+        WHERE r.topic_id = ?
+        ORDER BY r.created_at ASC
       `, [topic.id])
       forums.push({ ...topic, replies })
     }
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
-    res.json({
+    return res.json({
       course: {
         title: level.title,
         description: level.description || '',
-        manual: level.manual || '',
+        manual,
         units: units.map(u => ({
-          id: u.id, unitId: String(u.unit_number).padStart(2, '0'), number: `Unit ${String(u.unit_number).padStart(2, '0')}`,
-          reference: u.unit_code, title: u.title, status: u.status, description: u.description || '',
-          instructorId: u.instructor_id, instructorName: u.instructor_name || ''
+          id: u.id,
+          unitId: String(u.unit_number).padStart(2, '0'),
+          number: `Unit ${String(u.unit_number).padStart(2, '0')}`,
+          reference: u.unit_code,
+          title: u.title,
+          status: u.status,
+          description: u.description || '',
+          instructorId: u.instructor_id,
+          instructorName: u.instructor_name || ''
         })),
         assessments,
         announcements,
@@ -200,9 +210,12 @@ app.put('/api/course/manual', requireAuth, requireRole('instructor'), async (req
     const { manual = '' } = req.body
     const [[existing]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!existing) return res.status(400).json({ message: 'Set a level first.' })
-    const [columns] = await pool.query(`SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='levels' AND COLUMN_NAME='teaching_manual' LIMIT 1`)
-    if (!columns.length) return res.status(409).json({ message: 'Teaching manual storage is not available in the current database schema.' })
-    await pool.query('UPDATE levels SET teaching_manual = ? WHERE id = ?', [String(manual), existing.id])
+    try {
+      await pool.query('UPDATE levels SET teaching_manual = ? WHERE id = ?', [String(manual), existing.id])
+    } catch (error) {
+      if (error.code === 'ER_BAD_FIELD_ERROR') return res.status(409).json({ message: 'Teaching manual storage is not available in the current database schema.' })
+      throw error
+    }
     res.json({ message: 'Teaching manual saved.' })
   } catch (error) {
     console.error(error)
@@ -217,9 +230,7 @@ app.post('/api/course/units', requireAuth, requireRole('instructor'), async (req
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!level) return res.status(400).json({ message: 'Set a level first.' })
     const [[existing]] = await pool.query('SELECT id, instructor_id FROM units WHERE level_id = ? AND unit_number = ? LIMIT 1', [level.id, Number(unitId)])
-    if (existing && existing.instructor_id && Number(existing.instructor_id) !== Number(req.user.id)) {
-      return res.status(409).json({ message: 'This unit is already assigned to another instructor.' })
-    }
+    if (existing && existing.instructor_id && Number(existing.instructor_id) !== Number(req.user.id)) return res.status(409).json({ message: 'This unit is already assigned to another instructor.' })
     if (existing) {
       await pool.query('UPDATE units SET unit_code = ?, title = ?, status = ?, description = ?, instructor_id = ? WHERE id = ?', [String(reference), String(title).trim(), String(status), String(description), req.user.id, existing.id])
       return res.json({ message: 'Unit saved.' })
@@ -238,9 +249,7 @@ app.put('/api/course/assessments', requireAuth, requireRole('instructor'), async
     const [[level]] = await pool.query('SELECT id FROM levels ORDER BY id LIMIT 1')
     if (!level) return res.status(400).json({ message: 'Set a level first.' })
     await pool.query('DELETE FROM assessments WHERE level_id = ?', [level.id])
-    for (const type of [...new Set(types.map(value => String(value).trim()).filter(Boolean))]) {
-      await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
-    }
+    for (const type of [...new Set(types.map(value => String(value).trim()).filter(Boolean))]) await pool.query('INSERT INTO assessments (level_id, type) VALUES (?, ?)', [level.id, type])
     res.json({ message: 'Assessment methods saved.' })
   } catch (error) {
     console.error(error)
