@@ -59,11 +59,12 @@ if (typeof window !== 'undefined') {
       try {
         await login(normalizedEmail, password, role)
         window.location.reload()
-        return
+        return true
       } catch (error) {
         lastError = error
       }
     }
-    throw lastError || new Error('Invalid email, password or account type.')
+    window.alert(lastError?.message || 'Invalid email, password or account type.')
+    return false
   }
 }
