@@ -9,6 +9,17 @@ function token() {
   return sessionStorage.getItem(TOKEN_KEY)
 }
 
+function currentUserId() {
+  try {
+    const value = token()?.split('.')[1]
+    if (!value) return null
+    const payload = JSON.parse(atob(value.replace(/-/g, '+').replace(/_/g, '/')))
+    return payload.id == null ? null : Number(payload.id)
+  } catch {
+    return null
+  }
+}
+
 async function request(path, options = {}) {
   const currentToken = token()
   if (!currentToken) throw new Error('Your session has expired. Please log in again.')
@@ -56,6 +67,7 @@ function normalizeCourse(course = {}) {
           id: item.id,
           title: item.title || '',
           message: item.message ?? item.content ?? '',
+          authorId: item.authorId ?? item.author_id ?? null,
           author: item.author ?? item.author_name ?? '',
           date: item.date ?? formatDate(item.created_at)
         }))
@@ -64,6 +76,7 @@ function normalizeCourse(course = {}) {
       ? course.forums.map(topic => ({
           id: topic.id,
           topic: topic.topic ?? topic.title ?? '',
+          authorId: topic.authorId ?? topic.author_id ?? null,
           createdBy: topic.createdBy ?? topic.author_name ?? '',
           messages: Array.isArray(topic.messages)
             ? topic.messages
@@ -159,8 +172,10 @@ export async function syncCourse(nextCourse) {
       }
     }
 
+    const userId = currentUserId()
     for (const id of previousAnnouncementIds) {
-      if (!nextAnnouncementIds.has(id) && /^\d+$/.test(id)) {
+      const oldAnnouncement = previous.announcements.find(item => String(item.id) === id)
+      if (!nextAnnouncementIds.has(id) && /^\d+$/.test(id) && oldAnnouncement && Number(oldAnnouncement.authorId) === userId) {
         await request(`/api/announcements/${id}`, { method: 'DELETE' })
       }
     }
@@ -202,7 +217,8 @@ export async function syncCourse(nextCourse) {
     }
 
     for (const id of previousTopicIds) {
-      if (!nextTopicIds.has(id) && /^\d+$/.test(id)) {
+      const oldTopic = previous.forums.find(item => String(item.id) === id)
+      if (!nextTopicIds.has(id) && /^\d+$/.test(id) && oldTopic && Number(oldTopic.authorId) === userId) {
         await request(`/api/forum/topics/${id}`, { method: 'DELETE' })
       }
     }
