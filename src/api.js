@@ -1,4 +1,4 @@
-const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/$/, '')
+const API_URL = (import.meta.env.VITE_API_URL || (import.meta.env.PROD ? 'https://eles-api.onrender.com' : 'http://localhost:5000')).replace(/\/$/, '')
 const TOKEN_KEY = 'eles_auth_token'
 
 export function getToken() {
@@ -18,20 +18,13 @@ async function request(path, options = {}) {
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
 
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers })
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers, cache: 'no-store' })
   const body = await response.json().catch(() => ({}))
 
-  if (!response.ok) {
-    throw new Error(body.message || 'Unable to complete request.')
-  }
-
+  if (!response.ok) throw new Error(body.message || 'Unable to complete request.')
   return body
 }
 
-// Role is deliberately NOT sent to the backend during login.
-// The backend authenticates from email/password and returns the user's role.
-// The selected Student/Instructor mode remains a frontend login context and
-// is checked against the authenticated user's returned role.
 export async function login(email, password, expectedRole = null) {
   const body = await request('/api/auth/login', {
     method: 'POST',
@@ -66,11 +59,7 @@ if (typeof window !== 'undefined') {
     try {
       const activeRoleButton = document.querySelector('.role-switch button.active')
       const selectedRole = activeRoleButton?.textContent?.trim().toLowerCase()
-      return await login(
-        email.trim().toLowerCase(),
-        password,
-        selectedRole === 'student' || selectedRole === 'instructor' ? selectedRole : null
-      )
+      return await login(email.trim().toLowerCase(), password, selectedRole === 'student' || selectedRole === 'instructor' ? selectedRole : null)
     } catch (error) {
       window.alert(error?.message || 'Invalid email or password.')
       return false
