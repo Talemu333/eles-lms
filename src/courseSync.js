@@ -147,16 +147,27 @@ export async function syncCourse(nextCourse) {
     }
 
     const previousAnnouncementIds = new Set(previous.announcements.map(item => String(item.id)))
+    const nextAnnouncementIds = new Set(next.announcements.map(item => String(item.id)))
+
     for (const announcement of next.announcements) {
       if (!previousAnnouncementIds.has(String(announcement.id))) {
-        await request('/api/announcements', {
+        const created = await request('/api/announcements', {
           method: 'POST',
           body: JSON.stringify({ title: announcement.title, content: announcement.message || '' })
         })
+        if (created?.id) announcement.id = created.id
+      }
+    }
+
+    for (const id of previousAnnouncementIds) {
+      if (!nextAnnouncementIds.has(id) && /^\d+$/.test(id)) {
+        await request(`/api/announcements/${id}`, { method: 'DELETE' })
       }
     }
 
     const previousTopicIds = new Set(previous.forums.map(topic => String(topic.id)))
+    const nextTopicIds = new Set(next.forums.map(topic => String(topic.id)))
+
     for (const topic of next.forums) {
       if (!previousTopicIds.has(String(topic.id))) {
         const messages = Array.isArray(topic.messages) ? topic.messages : []
@@ -166,6 +177,7 @@ export async function syncCourse(nextCourse) {
         })
         const serverTopicId = created?.id
         if (serverTopicId) {
+          topic.id = serverTopicId
           for (const reply of messages.slice(1)) {
             if (reply.text?.trim()) {
               await request(`/api/forum/topics/${serverTopicId}/replies`, {
@@ -186,6 +198,12 @@ export async function syncCourse(nextCourse) {
             })
           }
         }
+      }
+    }
+
+    for (const id of previousTopicIds) {
+      if (!nextTopicIds.has(id) && /^\d+$/.test(id)) {
+        await request(`/api/forum/topics/${id}`, { method: 'DELETE' })
       }
     }
 
