@@ -1,0 +1,139 @@
+import fs from 'node:fs'
+
+const path = 'server/server.js'
+const text = fs.readFileSync(path, 'utf8')
+const pattern = /\\n\/\/ PASSWORD_RESET_IMPLEMENTED[\\s\\S]*?\\n\n\/\/ Course data/
+
+if (!pattern.test(text)) {
+  throw new Error('Malformed password reset block was not found.')
+}
+
+const block = `// PASSWORD_RESET_IMPLEMENTED
+const PASSWORD_RESET_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    token_hash CHAR(64) NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_password_reset_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_password_reset_user (user_id),
+    INDEX idx_password_reset_expires (expires_at)
+  ) ENGINE=InnoDB
+`
+
+async function ensurePasswordResetTable() {
+  await pool.query(PASSWORD_RESET_TABLE_SQL)
+}
+
+function hashResetToken(token) {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+async function sendPasswordResetEmail(to, resetUrl) {
+  const apiKey = process.env.RESEND_API_KEY
+  const from = process.env.MAIL_FROM || 'ELES LMS <noreply@eles-lms.org>'
+  if (!apiKey) throw new Error('RESEND_API_KEY is not configured.')
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject: 'Reset your ELES LMS password',
+      html: `
+        <div style="font-family:Arial,sans-serif;line-height:1.6;max-width:600px;margin:auto">
+          <h2>ELES LMS Password Reset</h2>
+          <p>We received a request to reset your ELES LMS password.</p>
+          <p><a href="${resetUrl}" style="display:inline-block;padding:12px 18px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px">Reset Password</a></p>
+          <p>This link expires in 1 hour and can only be used once.</p>
+          <p>If you did not request this, you can safely ignore this email.</p>
+        </div>
+      `
+    })
+  })
+
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.message || 'Resend rejected the email.')
+}
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const normalizedEmail = String(req.body?.email || '').trim().toLowerCase()
+  if (!normalizedEmail) return res.status(400).json({ message: 'Email is required.' })
+
+  try {
+    await ensurePasswordResetTable()
+    const [users] = await pool.query('SELECT id, email FROM users WHERE email = ? LIMIT 1', [normalizedEmail])
+
+    if (users.length) {
+      const user = users[0]
+      const token = randomBytes(32).toString('hex')
+      const tokenHash = hashResetToken(token)
+      await pool.query('DELETE FROM password_reset_tokens WHERE user_id = ? OR expires_at < NOW() OR used_at IS NOT NULL', [user.id])
+      await pool.query(
+        'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR))',
+        [user.id, tokenHash]
+      )
+
+      const appUrl = (process.env.APP_URL || 'http://localhost:5173').replace(/\/$/, '')
+      const resetUrl = `${appUrl}/?reset=${encodeURIComponent(token)}`
+
+      try {
+        await sendPasswordResetEmail(user.email, resetUrl)
+      } catch (mailError) {
+        console.error('[password-reset-email]', mailError)
+        await pool.query('DELETE FROM password_reset_tokens WHERE token_hash = ?', [tokenHash])
+      }
+    }
+
+    return res.json({ message: 'If an account exists for that email, a password reset link has been sent.' })
+  } catch (error) {
+    console.error('[forgot-password]', error)
+    return res.status(500).json({ message: 'Unable to process the password reset request.' })
+  }
+})
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const token = String(req.body?.token || '').trim()
+  const password = String(req.body?.password || '')
+  if (!token || !password) return res.status(400).json({ message: 'Reset token and new password are required.' })
+  if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' })
+
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    await connection.query(PASSWORD_RESET_TABLE_SQL)
+    const tokenHash = hashResetToken(token)
+    const [rows] = await connection.query(
+      'SELECT id, user_id FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > NOW() LIMIT 1 FOR UPDATE',
+      [tokenHash]
+    )
+    if (!rows.length) {
+      await connection.rollback()
+      return res.status(400).json({ message: 'This password reset link is invalid or has expired.' })
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12)
+    await connection.query('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, rows[0].user_id])
+    await connection.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE id = ?', [rows[0].id])
+    await connection.query('DELETE FROM password_reset_tokens WHERE user_id = ? AND id <> ?', [rows[0].user_id, rows[0].id])
+    await connection.commit()
+    return res.json({ message: 'Password reset successful. You can now log in with your new password.' })
+  } catch (error) {
+    await connection.rollback()
+    console.error('[reset-password]', error)
+    return res.status(500).json({ message: 'Unable to reset the password.' })
+  } finally {
+    connection.release()
+  }
+})
+
+// Course data`
+
+fs.writeFileSync(path, text.replace(pattern, block), 'utf8')
+console.log('Password reset block repaired.')
